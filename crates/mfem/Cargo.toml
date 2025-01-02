@@ -1,0 +1,12 @@
+[package]
+name = "mfem"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mfem-sys = { version = "0.1.0", path = "../mfem-sys" }
+autocxx = "0.27.0"
+cxx = "1.0"
+
+[dev-dependencies]
+clap = { version = "4.5.4", features = ["derive"] }
