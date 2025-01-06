@@ -1099,7 +1099,7 @@ impl GSSmoother {
 }
 
 // TODO: make a prelude and do not include this inside.
-/// Preconditioned conjugate gradient method. (tolerances are squared)
+/// Preconditioned conjugate gradient method.
 pub fn pcg<'a>(
     a: &'a Operator,
     solver: &'a mut Solver,
@@ -1132,15 +1132,18 @@ impl PCG<'_> {
         Self { print_iter: pr, .. self }
     }
 
+    /// Set the maximum number of iterations.
     pub fn max_num_iter(self, mx: usize) -> Self {
         let max_num_iter = mx.try_into().unwrap_or(i32::MAX);
         Self { max_num_iter, .. self }
     }
 
+    /// Set the relative tolerance.  Note that tolerances are squared.
     pub fn rtol(self, rtol: f64) -> Self {
         Self { rtol: rtol.max(0.), .. self }
     }
 
+    /// Set the absolute tolerance.  Note that tolerances are squared.
     pub fn atol(self, atol: f64) -> Self {
         Self { atol: atol.max(0.), .. self }
     }
