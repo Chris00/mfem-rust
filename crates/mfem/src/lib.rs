@@ -1,20 +1,22 @@
 use autocxx::prelude::*;
-use cxx::{UniquePtr, let_cxx_string};
-use mfem_sys::{self as ffi, mfem};
+use cxx::{let_cxx_string, UniquePtr};
+use mfem_sys as mfem;
 use std::{
-    convert::{From, TryFrom}, fmt, io, marker::PhantomData, path::Path, pin::Pin, ptr, slice
+    convert::{From, TryFrom}, fmt, i32, io, marker::PhantomData, path::Path, pin::Pin, ptr, slice
 };
 
 #[derive(Debug)]
 pub enum Error {
     // TODO: be more precise.
     IO(io::Error),
+    ConversionFailed,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::IO(e) => write!(f, "IO({e})"),
+            Self::ConversionFailed => write!(f, "Conversion failed"),
         }
     }
 }
@@ -27,226 +29,214 @@ impl From<io::Error> for Error {
     }
 }
 
-macro_rules! with_lifetime {
-    ($ty: ident <>) => {
-        $ty
-    };
-    ($ty: ident <$l: lifetime>) => {
-        $ty < 'a > // Macros are not hygienic w.r.t. lifetimes.
+/// Wrap mfem::$ty into $tymfem.  This `Deref` to this base and not
+/// inherit the C++ operations (we want to define our own to have a
+/// sleek Rusty interface).
+///
+/// You want to define a base type if one of the two situations occurs:
+/// - The type is returned by reference from functions;
+/// - Multiple sub-classes exist (the subclass relationship is handled
+///   by `Deref` to the base class — hence returning a ref to this type).
+macro_rules! wrap_mfem_base {
+    ($(#[$doc: meta])* $tymfem: ident, mfem $ty: ident) => {
+        // Wrap the `mfem` value in order not to inherit `mfem`
+        // methods (we want to redefine them with Rust conventions).
+        //
+        // When a C++ method return a pointer, we want be able to
+        // interpret it as a (mutable) reference to this wrapper
+        // struct.  The memory of this type is controlled by C++,
+        // it should never be accessible as a Rust value.
+        #[repr(transparent)]
+        #[allow(non_camel_case_types)]
+        $(#[$doc])*
+        pub struct $tymfem {
+            inner: mfem:: $ty,
+        }
+        #[allow(dead_code)]
+        impl $tymfem {
+            /// To wrap a *non-owned* pointer.
+            ///
+            /// *Safety*: Make sure the lifetime is constrained not to
+            /// exceed the life of the pointed value.
+            #[inline]
+            unsafe fn ref_of_mfem<'a>(ptr: *const mfem::$ty) -> &'a Self {
+                debug_assert!(! ptr.is_null());
+                // `ptr` is a pointer to `$tymfem`.  Since the
+                // representation of `Self` is transparent, `ptr` can
+                // be seen as a reference to `Self`.
+                &*(ptr as *const $tymfem)
+            }
+            #[inline]
+            unsafe fn mut_of_mfem<'a>(ptr: *mut mfem::$ty) -> &'a mut Self {
+                debug_assert!(! ptr.is_null());
+                &mut *(ptr as *mut $tymfem)
+            }
+            #[inline]
+            fn as_mfem(&self) -> & mfem:: $ty {
+                &self.inner
+            }
+            // One cannot move (e.g. `Clone`) the returned value.
+            #[inline]
+            fn as_mut_mfem(&mut self) -> Pin<&mut mfem:: $ty> {
+                unsafe { Pin::new_unchecked(&mut self.inner) }
+            }
+        }
     };
 }
 
-/// Define a type owning a MFEM pointer and related types:
-/// - `$tybase` for the "lower" type on which to implement
-///    shared operations (on & or &mut),
-/// - `$tyref` to hold immutable references to the pointer (but
-///   not freeing it).
-macro_rules! new_struct_with_ref {
+/// Define an struct owning the value `mfem::$ty`.
+/// If a `$tybase` is given, it `Deref` to that type.
+macro_rules! wrap_mfem {
     ($(#[$doc: meta])* $ty: ident < $($l: lifetime)? >,
-        $tybase: ident, //
-        $tyref: ident,
-        $inner: ty
+        base $(#[$docmfem: meta])* $tymfem: ident
     ) => {
-        new_struct_with_ref!(base $tybase <$($l)?>, $inner);
-        new_struct_with_ref!(ref $tyref <$($l)?>, $tybase, $inner);
-        new_struct_with_ref!(main $(#[$doc])* $ty <$($l)?>, $tybase, $inner);
-        new_struct_with_ref!(main-constructor $ty <$($l)?>, $tybase, $inner);
+        wrap_mfem!(defstruct $(#[$doc])* $ty <$($l)?>);
+        wrap_mfem_base!($(#[$docmfem])* $tymfem, mfem $ty);
+        // Deref to the base.
+        impl $(<$l>)? ::std::ops::Deref for $ty $(<$l>)? {
+            type Target = $tymfem;
+
+            #[inline]
+            fn deref(&self) -> &Self::Target {
+                let ptr: & mfem:: $ty = self.inner.as_ref().unwrap();
+                unsafe { $tymfem::ref_of_mfem(ptr) }
+            }
+        }
+        impl $(<$l>)? ::std::ops::DerefMut for $ty $(<$l>)? {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                let ptr: *mut mfem::$ty = self.inner.as_mut_ptr();
+                unsafe { $tymfem::mut_of_mfem(ptr) }
+            }
+        }
     };
-    (subclass $(#[$doc: meta])* $ty: ident < $($l: lifetime)? >,
-        $tybase: ident, // Base class or slice.
-        $tyref: ident, // FIXME: needed?
-        $inner: ty, $inner_base: ty
-    ) => {
-        // In the case of a subclass, we suppose that the "base class"
-        // $tybase has already been defined.
-        new_struct_with_ref!(ref $tyref <$($l)?>, $tybase, $inner_base);
-        new_struct_with_ref!(main $(#[$doc])* $ty <$($l)?>,
-            $tybase, $inner_base);
-        // Constructor from $inner
+
+    ($(#[$doc: meta])* $ty: ident < $($l: lifetime)? >) => {
+        wrap_mfem!(defstruct $(#[$doc])* $ty <$($l)?>);
+        // No base type.  Provide the facilities to access the
+        // underlying value.
         #[allow(dead_code)]
         impl $(<$l>)? $ty $(<$l>)? {
-            /// Takes ownership of the pointee by `x` and wrap it into `Self`.
             #[inline]
-            unsafe fn from_raw(ptr: *mut $inner_base) -> Self {
-                let tyref = unsafe { $tybase::from_raw(ptr) };
-                $ty { inner: tyref }
+            fn as_mfem(&self) -> & mfem:: $ty {
+                &self.inner.as_ref().unwrap()
             }
+            // One cannot move (e.g. `Clone`) the returned value.
             #[inline]
-            fn from_unique_ptr(ptr: UniquePtr<$inner_base>) -> Self {
-                unsafe { Self::from_raw(ptr.into_raw()) }
-            }
-            #[inline]
-            fn emplace<N>(n: N) -> Self
-            where N: New<Output = $inner> {
-                unsafe {
-                    Self::from_raw(UniquePtr::emplace(n)
-                        .into_raw() as *mut $inner_base)
-                }
-            }
-            #[inline]
-            fn as_ref_mfem(&self) -> & $inner {
-                let x: & $inner_base = self.inner.as_ref();
-                // $inner is a subclass of $inner_base but the type
-                // makes sure that this instance is $inner, so this
-                // cast is safe.
-                unsafe { &*(x as *const _ as *const $inner) }
+            fn as_mut_mfem(&mut self) -> Pin<&mut mfem:: $ty> {
+                self.inner.pin_mut()
             }
         }
     };
-    (base $tybase: ident < $($l: lifetime)? >, $inner: ty) => {
-        // 1. We hold a mutable pointer, it must only be mutably
-        //    de-referenced if we hold a `&mut $tybase`.
-        // 2. The pointee is pinned.
-        // 3. Immutable such values must always be returned behind
-        //    a shared reference (& $tybase).  Since this does not
-        //    implement `Copy`, the user will not be able to take
-        //    ownership (and then violate the immutability).
-        // 4. Basically, there should be no way to take ownership
-        //    of such values outside this library.
-        #[must_use]
-        pub struct $tybase $(<$l>)? {
-            inner: *mut $inner,
-            marker: PhantomData<$(&$l)? ()>,
-        }
-        impl $(<$l>)? AsRef<$inner> for $tybase $(<$l>)? {
-            fn as_ref(&self) -> & $inner {
-                unsafe { self.inner.as_ref().unwrap() }
-            }
-        }
-        #[allow(dead_code)]
-        impl $(<$l>)? $tybase $(<$l>)?{
-            #[inline]
-            unsafe fn from_raw(raw: *mut $inner) -> Self {
-                Self { inner: raw,  marker: PhantomData }
-            }
-            #[inline]
-            fn as_const_ptr(&self) -> *const $inner {
-                self.inner
-            }
-            #[inline]
-            fn pin_mut(&mut self) -> Pin<&mut $inner> {
-                unsafe {
-                    let ptr: &mut $inner = &mut *self.inner;
-                    Pin::new_unchecked(ptr)
-                }
-            }
-        }
-    };
-    (ref $tyref: ident <$($l: lifetime)?>, $tybase: ident, $inner: ty) => {
-        /// Immutable reference.  This has a single lifetime that
-        /// accounts for all dependencies.
-        #[must_use]
-        #[allow(non_camel_case_types)]
-        pub struct $tyref<'a> {
-            // The intention is to hold `&'a $inner` but a $tybase is
-            // used instead to be able to deref to `$tybase`.
-            inner: with_lifetime!($tybase <$($l)?>),
-            marker: PhantomData<&'a $inner>,
-        }
-        impl<'a> std::ops::Deref for $tyref<'a> {
-            type Target = with_lifetime!($tybase <$($l)?>);
-            fn deref(&self) -> &Self::Target { &self.inner }
-        }
-        #[allow(dead_code)]
-        impl<'a> $tyref<'a> {
-            /// Safety: the value pointed by `x` must live at least
-            /// for `'a`.  Make sure you add the right lifetime constraints.
-            #[inline]
-            unsafe fn from_raw(x: *const $inner) -> Self {
-                let x = x as *mut _; // This type must protect from mutating.
-                let slice = unsafe { $tybase::from_raw(x) };
-                Self { inner: slice,  marker: PhantomData }
-            }
-            #[inline]
-            fn from_ref(x: &'a $inner) -> Self {
-                unsafe { Self::from_raw(x as *const _ as *mut _) }
-            }
-        }
-    };
-    (main $(#[$doc: meta])* $ty: ident < $($l: lifetime)? >,
-        $tybase: ident,
-        $inner: ty
-    ) => {
-        // The pointer is here OWNED.  Assume it was created from a
-        // `UniquePtr<$tybase>`.
+
+    (defstruct $(#[$doc: meta])* $ty: ident < $($l: lifetime)? >) => {
+        // This is basically a `UniquePtr` but with a nicer name and a
+        // possible lifetime parameter to track dependencies.
         $(#[$doc])*
         #[must_use]
+        #[repr(transparent)]
         pub struct $ty $(<$l>)? {
-            inner: $tybase $(<$l>)?,
+            inner: UniquePtr<mfem:: $ty>,
+            marker: PhantomData<$(&$l)? ()>,
         }
-        impl $(<$l>)? std::ops::Drop for $ty $(<$l>)? {
-            fn drop(&mut self) {
-                let ptr = unsafe { UniquePtr::from_raw(self.inner.inner) };
-                drop(ptr);
-            }
-        }
-        impl $(<$l>)? std::ops::Deref for $ty $(<$l>)? {
-            type Target = $tybase $(<$l>)?;
-            fn deref(&self) -> &Self::Target { &self.inner }
-        }
-        impl $(<$l>)? std::ops::DerefMut for $ty $(<$l>)? {
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.inner
-            }
-        }
-    };
-    (main-constructor $ty: ident < $($l: lifetime)? >,
-        $tybase: ident,
-        $inner: ty
-    ) => {
         #[allow(dead_code)]
         impl $(<$l>)? $ty $(<$l>)? {
-            /// Takes ownership of the pointee by `x` and wrap it into `Self`.
+            /// Return an *owned* value, from the pointer `ptr`.
             #[inline]
-            unsafe fn from_raw(ptr: *mut $inner) -> Self {
-                let tyref = unsafe { $tybase::from_raw(ptr) };
-                $ty { inner: tyref }
-            }
-            #[inline]
-            fn from_unique_ptr(ptr: UniquePtr<$inner>) -> Self {
-                unsafe { Self::from_raw(ptr.into_raw()) }
+            fn from_unique_ptr(ptr: UniquePtr<mfem:: $ty>) -> Self {
+                Self { inner: ptr,  marker: PhantomData }
             }
         }
     };
-    (emplace $ty: ident < $($l: lifetime)? >, $inner: ty) => {
+}
+
+macro_rules! wrap_mfem_emplace {
+    ($ty: ident < $($l: lifetime)? >) => {
         impl $(<$l>)? $ty $(<$l>)? {
             #[inline]
             fn emplace<N>(n: N) -> Self
-            where N: New<Output = $inner> {
-                Self::from_unique_ptr(UniquePtr::emplace(n))
+            where N: New<Output = mfem:: $ty> {
+                let inner = UniquePtr::emplace(n);
+                Self { inner,  marker: PhantomData }
+            }
+        }
+    };
+}
+
+/// Empty trait simply to be able to write a safety check as a bound.
+#[allow(dead_code)]
+trait Subclass {}
+
+macro_rules! subclass {
+    ($tysub0: ident, $tysub: ident, $ty0: ident, $ty: ident) => {
+        // Use the fact that `autocxx` implements the `AsRef`
+        // relationship for sub-classes to make sure it is safe.
+        impl Subclass for $tysub
+        where mfem::$tysub0 : AsRef<mfem::$ty0> {}
+        subclass!(unsafe $tysub, $ty);
+    };
+    (unsafe $tysub: ident, $ty: ident) => {
+        impl ::std::ops::Deref for $tysub {
+            type Target = $ty;
+
+            #[inline]
+            fn deref(&self) -> & Self::Target {
+                unsafe {
+                    // Safety: Since, on the C++ side, mfem::$subty is
+                    // a subclass of mfem::$ty, the pointers can be
+                    // cast.  As the representation is transparent, we
+                    // can do the same with the wrapped types.
+                    &*(self as *const _ as *const $ty)
+                    // Remark: `$ty` implements `Drop`.  But since we
+                    // only return a reference to it, it should not be
+                    // triggered.
+                }
+            }
+        }
+        impl ::std::ops::DerefMut for $tysub {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                unsafe {
+                    // Safety: see `Deref`.
+                    &mut *(self as *mut _ as *mut $ty)
+                }
             }
         }
     };
 }
 
 // FIXME: Reverse: Array<T> if trait on T.
-new_struct_with_ref!(
+wrap_mfem!(
+    /// An array of `i32`.
     ArrayInt<>,
-    ArrayIntSlice,
-    ArrayIntRef,
-    ffi::ArrayInt);
+    base
+    /// Underlying data of [`ArrayInt`].
+    AArrayInt);
 
 impl Clone for ArrayInt {
     fn clone(&self) -> Self {
-        Self::from_unique_ptr(ffi::Arrayint_copy(self.as_ref()))
+        Self::from_unique_ptr(mfem::ArrayInt_copy(self.as_mfem()))
     }
 }
 
-impl std::ops::Deref for ArrayIntSlice {
+impl std::ops::Deref for AArrayInt {
     type Target = [i32];
+
+    #[inline]
     fn deref(&self) -> &[i32] {
-        let a = self.as_ref();
-        let data = ffi::Arrayint_GetData(a);
+        let len = self.len();
+        let data = mfem::ArrayInt_GetData(self.as_mfem());
         // autocxx::c_int is declared "transparent".
         let data = data as *const std::ffi::c_int;
-        unsafe { slice::from_raw_parts(data, self.len()) }
+        unsafe { slice::from_raw_parts(data, len) }
     }
 }
 
-impl std::ops::DerefMut for ArrayIntSlice {
+impl std::ops::DerefMut for AArrayInt {
+    #[inline]
     fn deref_mut(&mut self) -> &mut [i32] {
         let len = self.len();
-        let data = ffi::Arrayint_GetDataMut(self.pin_mut());
+        let data = mfem::ArrayInt_GetDataMut(self.as_mut_mfem());
         let data = data as *mut std::ffi::c_int;
         unsafe { slice::from_raw_parts_mut(data, len) }
     }
@@ -260,53 +250,85 @@ impl Default for ArrayInt {
 
 impl ArrayInt {
     pub fn new() -> Self {
-        Self::from_unique_ptr(ffi::Arrayint_with_len(c_int(0)))
+        Self::from_unique_ptr(mfem::ArrayInt_with_len(c_int(0)))
     }
 
     pub fn with_len(len: usize) -> Self {
         let len = len.try_into().expect("Valid i32 len");
-        Self::from_unique_ptr(ffi::Arrayint_with_len(c_int(len)))
+        Self::from_unique_ptr(mfem::ArrayInt_with_len(c_int(len)))
     }
 }
 
-impl ArrayIntSlice {
+impl AArrayInt {
     #[inline]
     pub fn len(&self) -> usize {
-        let len: i32 = ffi::Arrayint_len(self.as_ref()).into();
+        let len: i32 = mfem::ArrayInt_len(self.as_mfem()).into();
         debug_assert!(len >= 0);
         len as usize
     }
 }
 
-new_struct_with_ref!(
+wrap_mfem!(
     /// Vector of [`f64`] numbers.
     Vector<>,
-    VectorSlice,
-    VectorRef,
-    mfem::Vector);
+    base
+    /// Base type to which all structs that can be considered as vectors
+    /// [`Deref`][::std::ops::Deref].
+    AVector);
+wrap_mfem_emplace!(Vector<>);
 
-impl std::ops::Deref for VectorSlice {
+impl std::ops::Deref for AVector {
     type Target = [f64];
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         let len = self.len();
-        let data = self.as_ref().GetData();
-        unsafe { slice::from_raw_parts(data, len) }
+        if len == 0 {
+            &[]
+        } else {
+            let data = self.as_mfem().GetData();
+            unsafe { slice::from_raw_parts(data, len) }
+        }
     }
 }
 
-impl std::ops::DerefMut for VectorSlice {
+impl std::ops::DerefMut for AVector {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         let len = self.len();
-        let data = self.as_ref().GetData();
-        unsafe { slice::from_raw_parts_mut(data, len) }
+        if len == 0 {
+            &mut []
+        } else {
+            let data = self.as_mut_mfem().GetData();
+            unsafe { slice::from_raw_parts_mut(data, len) }
+        }
     }
 }
 
-impl VectorSlice {
+impl Default for Vector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Vector {
+    /// Return a new, empty, vector.
+    pub fn new() -> Self {
+        Vector::emplace(mfem::Vector::new())
+    }
+
+    pub fn with_len(len: usize) -> Self {
+        if len > std::i32::MAX as usize {
+            panic!("mfem::Vector::with_len: size {len} too large");
+        }
+        Vector::emplace(mfem::Vector::new3(c_int(len as i32)))
+    }
+}
+
+impl AVector {
     #[inline]
     pub fn len(&self) -> usize {
-        let l: i32 = self.as_ref().Size().into();
+        let l: i32 = self.as_mfem().Size().into();
         l as usize
     }
 
@@ -315,8 +337,57 @@ impl VectorSlice {
     }
 }
 
+pub use mfem::Operator_Type as OperatorType;
 
-/// Algorithm for [`Mesh::uniform_refinement`].
+wrap_mfem_base!(Operator, mfem Operator);
+
+impl Operator {
+    pub fn height(&self) -> usize {
+        let h = self.as_mfem().Height();
+        debug_assert!(h >= 0);
+        h as usize
+    }
+
+    pub fn width(&self) -> usize {
+        let h = self.as_mfem().Width();
+        debug_assert!(h >= 0);
+        h as usize
+    }
+
+    pub fn get_type(&self) -> OperatorType {
+        self.as_mfem().GetType()
+    }
+
+    /// This is a C++ virtual method.  One must only make it visible
+    /// in types for which it is implemented in C++.
+    unsafe fn recover_fem_solution(
+        &mut self,
+        from: &AVector,
+        b: &AVector,
+        x: &mut AVector,
+    ) {
+        unsafe {
+            self.as_mut_mfem().RecoverFEMSolution(
+                from.as_mfem(),
+                b.as_mfem(),
+                x.as_mut_mfem())
+        }
+    }
+}
+
+wrap_mfem!(
+    /// A matrix.
+    Matrix<>,
+    base
+    /// Matrix "slices" (many types [`Deref`][std::ops::Deref] to this one).
+    AMatrix);
+
+// XXX Ok to do with an abstract type?
+subclass!(unsafe AMatrix, Operator);
+
+
+
+/// Algorithm for [`AMesh::uniform_refinement`].
 pub enum RefAlgo {
     /// Algorithm "A".
     ///
@@ -327,9 +398,8 @@ pub enum RefAlgo {
     B = 1,
 }
 
-pub struct Mesh {
-    inner: UniquePtr<mfem::Mesh>,
-}
+wrap_mfem!(Mesh<>, base AMesh);
+wrap_mfem_emplace!(Mesh<>);
 
 impl Default for Mesh {
     fn default() -> Self {
@@ -337,18 +407,10 @@ impl Default for Mesh {
     }
 }
 
-impl AsRef<mfem::Mesh> for Mesh {
-    fn as_ref(&self) -> &mfem::Mesh {
-        self.inner.as_ref().unwrap()
-    }
-}
-
 impl Mesh {
     /// Return a new empty mesh.
     pub fn new() -> Self {
-        Self {
-            inner: UniquePtr::emplace(mfem::Mesh::new1()),
-        }
+        Self::emplace(mfem::Mesh::new1())
     }
 
     /// Return a mesh read from file in MFEM, Netgen, or VTK format.
@@ -373,51 +435,49 @@ impl Mesh {
             refine,
             fix_orientation,
         );
-        Ok(Self {
-            inner: UniquePtr::emplace(mesh),
-        })
+        Ok(Self::emplace(mesh))
     }
+}
 
+impl AMesh {
     #[doc(alias = "Dimension")]
     pub fn dimension(&self) -> i32 {
-        self.as_ref().Dimension().into()
+        self.as_mfem().Dimension().into()
     }
 
     #[doc(alias = "GetNE")]
     pub fn get_num_elems(&self) -> usize {
-        self.as_ref().GetNE().0 as usize
+        self.as_mfem().GetNE().0 as usize
     }
 
     /// Return the attribute of boundary element `i`.
     pub fn get_bdr_attribute(&self, i: i32) -> i32 {
-        self.as_ref().GetBdrAttribute(c_int(i)).into()
+        self.as_mfem().GetBdrAttribute(c_int(i)).into()
     }
 
-    pub fn bdr_attributes(&self) -> ArrayIntRef<'_> {
+    pub fn bdr_attributes(&self) -> &AArrayInt {
         // Return a pointer to a public attribute.
-        let mesh = self.inner.as_ref().unwrap();
-        ArrayIntRef::from_ref(ffi::Mesh_bdr_attributes(mesh))
+        let mesh = mfem::Mesh_bdr_attributes(self.as_mfem());
+        unsafe { AArrayInt::ref_of_mfem(mesh) }
     }
 
     // TODO: optional argument?
     pub fn uniform_refinement(&mut self, ref_algo: RefAlgo) {
-        self.inner
-            .pin_mut()
+        self.as_mut_mfem()
             .UniformRefinement1(c_int(ref_algo as i32))
     }
 
     // TODO: overloaded, invent meaningful names
-    pub fn get_nodes(&self) -> Option<GridFunctionRef<'_>> {
+    pub fn get_nodes(&self) -> Option<&AGridFunction> {
         // GetNodes() returns an internal structure.  Since `self`
         // holds a `UniquePtr`, the memory pointed to does not move
         // (as is the rule for C++).  Thus the pointer `gf` does not
         // change location either.
-        let gf: *const mfem::GridFunction =
-            self.inner.as_ref().unwrap().GetNodes2();
+        let gf: *const mfem::GridFunction = self.as_mfem().GetNodes2();
         if gf.is_null() {
             None
         } else {
-            Some(unsafe { GridFunctionRef::from_raw(gf as *mut _) })
+            Some(unsafe { AGridFunction::ref_of_mfem(gf) })
         }
     }
 
@@ -432,7 +492,7 @@ impl Mesh {
 }
 
 pub struct MeshSave<'a> {
-    mesh: &'a Mesh,
+    mesh: &'a AMesh,
     precision: i32,
 }
 
@@ -442,7 +502,7 @@ impl MeshSave<'_> {
         let_cxx_string!(
             filename = path.as_ref().as_os_str().as_encoded_bytes()
         );
-        self.mesh.inner.Save(&filename, c_int(self.precision));
+        self.mesh.as_mfem().Save(&filename, c_int(self.precision));
     }
 
     pub fn precision(&self, p: i32) -> Self {
@@ -479,13 +539,15 @@ pub enum BasisType {
 #[cfg(test)]
 #[test]
 fn test_num_basis_types() {
-    assert_eq!(ffi::NumBasisTypes, 9);
+    assert_eq!(mfem::NumBasisTypes, 9);
 }
 
 impl TryFrom<c_int> for BasisType {
-    type Error = ();
+    type Error = i32;
 
-    fn try_from(c_int(value): c_int) -> Result<Self, ()> {
+    /// Try to convert the value into a [`BasisType`].  If it fails,
+    /// it returns the number as an error.
+    fn try_from(c_int(value): c_int) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(BasisType::GaussLegendre),
             1 => Ok(BasisType::GaussLobatto),
@@ -496,40 +558,39 @@ impl TryFrom<c_int> for BasisType {
             6 => Ok(BasisType::Serendipity),
             7 => Ok(BasisType::ClosedGL),
             8 => Ok(BasisType::IntegratedGLL),
-            _ => Err(()),
+            _ => Err(value),
         }
     }
 }
 
-new_struct_with_ref!(
+wrap_mfem!(
     /// Collection of finite elements from the same family in multiple
     /// dimensions.
     FiniteElementCollection<>,
-    FiniteElementCollectionBase,
-    FiniteElementCollectionRef,
-    mfem::FiniteElementCollection);
+    base AFiniteElementCollection);
 
-impl FiniteElementCollectionBase {
+impl AFiniteElementCollection {
     pub fn get_name(&self) -> String {
-        let cstr = self.as_ref().Name();
+        let cstr = self.as_mfem().Name();
         let cstr = unsafe { std::ffi::CStr::from_ptr(cstr) };
         cstr.to_owned().into_string().expect("Name must be ASCII")
     }
 
     pub fn get_range_dim(&self, dim: i32) -> i32 {
-        self.as_ref().GetRangeDim(c_int(dim)).into()
+        self.as_mfem().GetRangeDim(c_int(dim)).into()
     }
 }
 
-new_struct_with_ref!(subclass
+wrap_mfem!(
     /// Arbitrary order H1-conforming (continuous) finite element.
     /// Implements [`FiniteElementCollection`].
     #[allow(non_camel_case_types)]
     H1_FECollection<>,
-    FiniteElementCollectionBase,
-    H1_FECollectionRef,  // FIXME: needed?
-    mfem::H1_FECollection, // is a subclass of:
-    mfem::FiniteElementCollection);
+    base AH1_FECollection);
+wrap_mfem_emplace!(H1_FECollection<>);
+subclass!(
+    H1_FECollection,         AH1_FECollection,
+    FiniteElementCollection, AFiniteElementCollection);
 
 impl H1_FECollection {
     /// Return a H1-conforming (continuous) finite elements with order
@@ -567,9 +628,11 @@ impl H1_FECollection {
     pub fn trace(p: i32, dim: i32, btype: BasisType) -> Self {
         Self::new(p, dim - 1, btype)
     }
+}
 
+impl AH1_FECollection {
     pub fn get_basis_type(&self) -> Option<BasisType> {
-        self.as_ref_mfem().GetBasisType().try_into().ok()
+        self.as_mfem().GetBasisType().try_into().ok()
     }
 }
 
@@ -587,32 +650,30 @@ impl From<Ordering> for mfem::Ordering_Type {
     }
 }
 
-new_struct_with_ref!(
+wrap_mfem!(
     /// Responsible for providing FEM view of the mesh, mainly managing
     /// the set of degrees of freedom.
     FiniteElementSpace<'deps>, // Single lifetime for deps.
-    FiniteElementSpaceBase,
-    FiniteElementSpaceRef,
-    ffi::FES);
-//new_struct_with_ref!(emplace FiniteElementSpace<'deps>, ffi::FES);
+    base AFiniteElementSpace);
 
 impl<'a> FiniteElementSpace<'a> {
     pub fn new<'mesh: 'a, 'fec: 'a>(
         mesh: &'mesh Mesh,
-        fec: &'fec FiniteElementCollectionBase,
+        fec: &'fec AFiniteElementCollection,
         vdim: i32,
         ordering: Ordering,
     ) -> Self {
-        let fes = ffi::FES_new(
-            mesh.inner.as_ref().expect("Initialized Mesh"),
-            fec.as_ref(),
+        let fes = mfem::FES_new(
+            mesh.as_mfem(),
+            fec.as_mfem(),
             c_int(vdim),
-            ordering.into());
+            ordering.into(),
+        );
         Self::from_unique_ptr(fes)
     }
 
     pub fn get_true_vsize(&self) -> i32 {
-        ffi::FES_GetTrueVSize(self.as_ref()).into()
+        mfem::FES_GetTrueVSize(self.as_mfem()).into()
     }
 
     pub fn get_essential_true_dofs(
@@ -621,64 +682,94 @@ impl<'a> FiniteElementSpace<'a> {
         ess_tdof_list: &mut ArrayInt,
         component: Option<usize>,
     ) {
-        ffi::FES_GetEssentialTrueDofs(
-            self.as_ref(),
-            bdr_attr_is_ess.as_ref(),
-            ess_tdof_list.inner.pin_mut(),
+        mfem::FES_GetEssentialTrueDofs(
+            self.as_mfem(),
+            bdr_attr_is_ess.as_mfem(),
+            ess_tdof_list.as_mut_mfem(),
             c_int(component.map(|c| c as i32).unwrap_or(-1)),
         )
     }
 }
 
-
-new_struct_with_ref!(
+wrap_mfem!(
     /// Represent a [`Vector`] with associated FE space.
     GridFunction<'fes>,
-    GridFunctionBase,
-    GridFunctionRef,
-    mfem::GridFunction);
-new_struct_with_ref!(emplace GridFunction<'fes>, mfem::GridFunction);
+    base AGridFunction);
+wrap_mfem_emplace!(GridFunction<'fes>);
+subclass!(GridFunction, AGridFunction, Vector, AVector);
 
 impl<'fes> GridFunction<'fes> {
     // XXX Can `fes` be mutated?
     // Hopefully so because it is shared with e.g. `Linearform`
     // XXX can you pass a different `fes` than the one for `Linearform`?
+    #[inline]
     pub fn with_fes(fes: &'fes FiniteElementSpace) -> Self {
         let gf = unsafe {
-            mfem::GridFunction::new2(fes.as_const_ptr() as *mut _)
+            mfem::GridFunction::new2(fes.as_mfem() as *const _ as *mut _)
         };
         GridFunction::emplace(gf)
     }
 }
 
-impl GridFunctionBase<'_> {
-    pub fn fec<'g>(&self) -> FiniteElementCollectionRef<'g>
-    where Self: 'g {
-        // Safety: `self` is temporarily borrowed mutably because
-        // `OwnFEC()` requires it (it gives access to the internal
-        // field) but the return value CANNOT be mutated.
+impl AGridFunction {
+    pub fn fec(&self) -> &AFiniteElementCollection {
+        let fec = mfem::GridFunction_OwnFEC(self.as_mfem());
+        unsafe { AFiniteElementCollection::ref_of_mfem(fec) }
+    }
+
+    pub fn fec_mut(&mut self) -> &mut AFiniteElementCollection {
+        let fec = self.as_mut_mfem().OwnFEC();
+        unsafe { AFiniteElementCollection::mut_of_mfem(fec) }
+    }
+
+    // pub fn slice_mut(&mut self) -> &mut [f64] {
+    //     let v = self.as_mut_mfem().GetTrueVector1();
+    //     let len: i32 = v.Size().into();
+    //     let data = v.GetData();
+    //     unsafe { slice::from_raw_parts_mut(data, len as usize) }
+    // }
+
+    // pub fn fill(&mut self, c: f64) {
+    //     self.slice_mut().fill(c);
+    // }
+
+    #[inline]
+    pub fn save(&self) -> GridFunctionSave<'_> {
+        GridFunctionSave {
+            gf: self,
+            precision: 8,
+        }
+    }
+}
+
+pub struct GridFunctionSave<'a> {
+    gf: &'a AGridFunction,
+    precision: i32,
+}
+
+impl GridFunctionSave<'_> {
+    // TODO: error ?
+    #[inline]
+    pub fn to_file(&self, path: impl AsRef<Path>) {
+        let_cxx_string!(
+            filename = path.as_ref().as_os_str().as_encoded_bytes()
+        );
         unsafe {
-            let gf = self.inner.as_mut().unwrap();
-            let raw = Pin::new_unchecked(gf).OwnFEC();
-            FiniteElementCollectionRef::from_raw(raw)
+            let fname = filename.get_unchecked_mut().as_ptr();
+            self.gf.as_mfem().Save1(
+                fname as *const i8,
+                c_int(self.precision));
         }
     }
 
-    pub fn slice_mut(&mut self) -> &mut [f64] {
-        let v = self.pin_mut().GetTrueVector1();
-        let len: i32 = v.Size().into();
-        let data = v.GetData();
-        unsafe { slice::from_raw_parts_mut(data, len as usize) }
-    }
-
-    pub fn fill(&mut self, c: f64) {
-        self.slice_mut().fill(c);
+    pub fn precision(&self, p: i32) -> Self {
+        Self { gf: self.gf,  precision: p }
     }
 }
 
 
 pub trait Coefficient: autocxx::PinMut<mfem::Coefficient> {
-    // TODO
+    // TODO: Want a trait or a "base class"?
 }
 
 pub struct ConstantCoefficient {
@@ -708,12 +799,14 @@ impl Coefficient for ConstantCoefficient {}
 impl ConstantCoefficient {
     pub fn new(c: f64) -> Self {
         let cc = mfem::ConstantCoefficient::new(c);
-        Self { inner: UniquePtr::emplace(cc) }
+        Self {
+            inner: UniquePtr::emplace(cc),
+        }
     }
 }
 
 /// Common capabilities of `LinarFormIntegrator`s.
-pub trait LinearFormIntegrator: Into<*mut ffi::LFI> {
+pub trait LinearFormIntegrator: Into<*mut mfem::LFI> {
     // Since linear form integrators are taken by value by
     // [`LinearForm::new`], there is no way to play the same as above
     // (de-referencing to a Base struct).
@@ -726,10 +819,10 @@ pub struct DomainLFIntegrator<'a> {
     marker: PhantomData<&'a ()>,
 }
 
-impl From<DomainLFIntegrator<'_>> for *mut ffi::LFI {
+impl From<DomainLFIntegrator<'_>> for *mut mfem::LFI {
     fn from(value: DomainLFIntegrator<'_>) -> Self {
         let dlfi = value.inner.into_raw();
-        dlfi as *mut ffi::LFI
+        dlfi as *mut mfem::LFI
     }
 }
 
@@ -737,54 +830,60 @@ impl LinearFormIntegrator for DomainLFIntegrator<'_> {}
 
 impl<'coeff> DomainLFIntegrator<'coeff> {
     pub fn new<QF>(qf: &'coeff mut QF, a: i32, b: i32) -> Self
-    where QF: Coefficient {
+    where
+        QF: Coefficient,
+    {
         // Safety: The result does not seem to take ownership of `qf`.
         let qf = qf.pin_mut();
         let lfi = mfem::DomainLFIntegrator::new(qf, c_int(a), c_int(b));
         let inner = UniquePtr::emplace(lfi);
-        Self { inner,  marker: PhantomData }
-    }
-}
-
-/// Vector with associated FE space and [`LinearFormIntegrator`]s.
-pub struct LinearForm<'a> {
-    inner: UniquePtr<mfem::LinearForm>,
-    marker: PhantomData<&'a ()>,
-}
-
-impl<'a> LinearForm<'a> {
-    pub fn new(fes: &FiniteElementSpaceBase<'a>) -> Self {
-        // XXX Safety: the underlying `fes` is not modified so can take it
-        // by ref only.
-        // TODO: Submit a PR to mfem.
-        let lf = unsafe {
-            mfem::LinearForm::new1(fes.as_const_ptr() as *mut _)
-        };
-        let inner = UniquePtr::emplace(lf);
-        Self { inner,  marker: PhantomData }
-    }
-
-    pub fn fe_space(&self) -> FiniteElementSpaceRef<'a> {
-        let raw = self.inner.FESpace1();
-        unsafe { FiniteElementSpaceRef::from_raw(raw) }
-    }
-
-    pub fn assemble(&mut self) {
-        self.inner.pin_mut().Assemble();
-    }
-
-    pub fn add_domain_integrator<Lfi>(&mut self, lfi: Lfi)
-    where Lfi: LinearFormIntegrator + 'a {
-        // The linear form "takes ownership of `lfi`".
-        let lfi = lfi.into();
-        unsafe {
-            self.inner.pin_mut().AddDomainIntegrator(lfi);
+        Self {
+            inner,
+            marker: PhantomData,
         }
     }
 }
 
+wrap_mfem!(
+    /// Vector with associated FE space and [`LinearFormIntegrator`]s.
+    LinearForm<'deps>,
+    base ALinearForm);
+wrap_mfem_emplace!(LinearForm<'deps>);
+subclass!(LinearForm, ALinearForm, Vector, AVector);
 
-pub trait BilinearFormIntegrator: Into<*mut ffi::BFI> {
+impl<'a> LinearForm<'a> {
+    pub fn new(fes: &FiniteElementSpace<'a>) -> Self {
+        // XXX Safety: the underlying `fes` is not modified so can take it
+        // by ref only.
+        // TODO: Submit a PR to mfem.
+        let lf = unsafe {
+            mfem::LinearForm::new1(fes.as_mfem() as *const _ as *mut _)
+        };
+        LinearForm::emplace(lf)
+    }
+
+    pub fn fe_space(&self) -> &'a AFiniteElementSpace {
+        let raw = self.as_mfem().FESpace1();
+        unsafe { AFiniteElementSpace::ref_of_mfem(raw) }
+    }
+
+    pub fn assemble(&mut self) {
+        self.as_mut_mfem().Assemble();
+    }
+
+    pub fn add_domain_integrator<Lfi>(&mut self, lfi: Lfi)
+    where
+        Lfi: LinearFormIntegrator + 'a,
+    {
+        // The linear form "takes ownership of `lfi`".
+        let lfi = lfi.into();
+        unsafe {
+            self.as_mut_mfem().AddDomainIntegrator(lfi);
+        }
+    }
+}
+
+pub trait BilinearFormIntegrator: Into<*mut mfem::BFI> {
     // Since bilinear form integrators are taken by value by
     // [`BilinearForm::new`], there is no way to play the same as above
     // (de-referencing to a Base struct).
@@ -797,86 +896,264 @@ pub struct DiffusionIntegrator<'a> {
 
 impl BilinearFormIntegrator for DiffusionIntegrator<'_> {}
 
-impl From<DiffusionIntegrator<'_>> for *mut ffi::BFI {
+impl From<DiffusionIntegrator<'_>> for *mut mfem::BFI {
     fn from(value: DiffusionIntegrator) -> Self {
         let di: *mut mfem::DiffusionIntegrator = value.inner.into_raw();
-        di as *mut ffi::BFI
+        di as *mut mfem::BFI
     }
 }
 
 impl<'coeff> DiffusionIntegrator<'coeff> {
     pub fn new<QF>(qf: &'coeff mut QF) -> Self
-    where QF: Coefficient {
+    where
+        QF: Coefficient,
+    {
         let qf = qf.pin_mut();
         let ir: *const mfem::IntegrationRule = ptr::null();
         let bfi = unsafe { mfem::DiffusionIntegrator::new1(qf, ir) };
-        Self { inner: UniquePtr::emplace(bfi), marker: PhantomData }
+        Self {
+            inner: UniquePtr::emplace(bfi),
+            marker: PhantomData,
+        }
     }
 }
 
-
-pub struct BilinearForm<'a> {
-    inner: UniquePtr<mfem::BilinearForm>,
-    marker: PhantomData<&'a ()>,
-}
+wrap_mfem!(
+    BilinearForm<'a>,
+    base ABilinearForm);
+wrap_mfem_emplace!(BilinearForm<'a>);
+subclass!(BilinearForm, ABilinearForm, Matrix, AMatrix);
 
 impl<'a> BilinearForm<'a> {
-    pub fn new(fes: &FiniteElementSpaceBase<'a>) -> Self {
+    pub fn new(fes: &FiniteElementSpace<'a>) -> Self {
         // XXX Safety: the underlying `fes` is not modified so can take it
         // by ref only.
         // TODO: Submit a PR to mfem.
         let lf = unsafe {
-            mfem::BilinearForm::new2(fes.as_const_ptr() as *mut _)
+            mfem::BilinearForm::new2(fes.as_mfem() as *const _ as *mut _)
         };
-        let inner = UniquePtr::emplace(lf);
-        Self { inner,  marker: PhantomData }
+        Self::emplace(lf)
     }
 
     /// Adds new Domain Integrator.
     pub fn add_domain_integrator<Bfi>(&mut self, bfi: Bfi)
-    where Bfi: BilinearFormIntegrator + 'a {
+    where
+        Bfi: BilinearFormIntegrator + 'a,
+    {
         // Doc says: "Assumes ownership of `bfi`".
         let bfi = bfi.into();
         unsafe {
-            self.inner.pin_mut().AddDomainIntegrator(bfi);
+            self.as_mut_mfem().AddDomainIntegrator(bfi);
         }
     }
 
     /// Assembles the form i.e. sums over all domain/bdr integrators.
     pub fn assemble(&mut self, skip_zeros: bool) {
-        let skip_zeros = if skip_zeros {1} else {0}; // TODO: option?
+        let skip_zeros = if skip_zeros { 1 } else { 0 }; // TODO: option?
         self.inner.pin_mut().Assemble(c_int(skip_zeros));
     }
 
     pub fn form_linear_system(
-        &self,
-        ess_tdof_list: &ArrayInt,
-        x: &VectorSlice,
-        b: &VectorSlice,
+        &mut self,
+        ess_tdof_list: &AArrayInt,
+        x: &AVector,
+        b: &AVector,
         a_mat: &mut OperatorHandle,
-        x_vec: &mut Vector,
-        b_vec: &mut Vector,
+        x_vec: &mut AVector,
+        b_vec: &mut AVector,
     ) {
-        todo!()
+        let copy_interior = c_int(0);
+        // self.as_mut_mfem().FormLinearSystem(
+        //     ess_tdof_list, x, b,
+        //     a_mat, x_vec, b_vec, copy_interior);
+        mfem::BilinearForm_FormLinearSystem(
+            self.as_mut_mfem(),
+            ess_tdof_list.as_mfem(),
+            x.as_mfem(),
+            b.as_mfem(),
+            // a_mat.as_mut_mfem(),
+            a_mat.inner.as_mut().unwrap(),
+            x_vec.as_mut_mfem(),
+            b_vec.as_mut_mfem(),
+            copy_interior);
+    }
+
+    // From `Operator`.
+    pub fn recover_fem_solution(
+        &mut self,
+        from: &AVector,
+        b: &AVector,
+        x: &mut AVector,
+    ) {
+        let op: &mut Operator = self;
+        unsafe { op.recover_fem_solution(from, b, x); }
     }
 }
 
+wrap_mfem!(
+    /// Pointer to an Operator of a specified type.
+    ///
+    /// This provides a common type for global, matrix-type operators
+    /// to be used in bilinear forms, gradients of nonlinear forms,
+    /// static condensation, hybridization, etc.
+    OperatorHandle<>, base AOperatorHandle);
+wrap_mfem_emplace!(OperatorHandle<>);
 
-pub struct OperatorHandle {
-    // TODO
+// `OperatorHandle` is NOT a subclass of `Operator` but contains a
+// pointer to an operator.  However, in C++, the operator *
+// de-reference to `Operator` and `->` accesses `Operator` methods.
+// In particular, where an `Operator&` is requested, a `*A`, where
+// `A` is a `OperatorHandle`, can be provided.
+//
+// It thus makes sense to implement `Deref`.
+impl ::std::ops::Deref for AOperatorHandle {
+    type Target = Operator;
+
+    #[inline]
+    fn deref(&self) -> & Self::Target {
+        let o = mfem::OperatorHandle_operator(self.as_mfem());
+        unsafe { Operator::ref_of_mfem(o) }
+    }
+}
+
+impl ::std::ops::DerefMut for AOperatorHandle {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let o = mfem::OperatorHandle_operator_mut(self.as_mut_mfem());
+        unsafe { Operator::mut_of_mfem(o.get_unchecked_mut()) }
+    }
+}
+
+impl Default for OperatorHandle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OperatorHandle {
     pub fn new() -> Self {
-        todo!()
+        Self::emplace(mfem::OperatorHandle::new())
+    }
+}
+
+impl AOperatorHandle {
+    pub fn get_type(&self) -> OperatorType {
+        self.as_mfem().Type()
+    }
+}
+
+// FIXME: to any sub-class coercion (Deref), one must associate a try
+// from the "bottom class" (following several Deref) to any type.  For
+// this, a C++ templated code that has a test "is instance of" can be
+// written.
+impl<'a> TryFrom<&'a AOperatorHandle> for &'a ASparseMatrix {
+    type Error = Error;
+
+    fn try_from(oh: &'a AOperatorHandle) -> Result<Self, Self::Error> {
+        if oh.get_type() == OperatorType::MFEM_SPARSEMAT {
+            unsafe {
+                let m = mfem::OperatorHandle_SparseMatrix(oh.as_mfem());
+                Ok(&ASparseMatrix::ref_of_mfem(m))
+            }
+        } else {
+            Err(Error::ConversionFailed)
+        }
+    }
+}
+// Deref not followed for traits.
+impl<'a> TryFrom<&'a OperatorHandle> for &'a ASparseMatrix {
+    type Error = Error;
+
+    fn try_from(oh: &'a OperatorHandle) -> Result<Self, Self::Error> {
+        let oh: &'a AOperatorHandle = oh;
+        oh.try_into()
+    }
+}
+
+wrap_mfem!(
+    /// Data type sparse matrix.
+    SparseMatrix<>, base ASparseMatrix);
+// Sub-class of AbstractSparseMatrix, itself a subclass of Matrix.
+
+
+wrap_mfem_base!(
+    /// Base type for solvers.
+    Solver, // No Rust constructor, only references.
+    mfem Solver);
+
+// XXX FIXME: For now the subclass feature does NOT work from an owned type.
+wrap_mfem!(GSSmoother<>, base AGSSmoother);
+wrap_mfem_emplace!(GSSmoother<>);
+// FIXME: There are more subtle sub-class relationships but this one
+// is needed for now.
+subclass!(unsafe AGSSmoother, Solver);
+
+
+impl GSSmoother {
+    pub fn new(a: &ASparseMatrix, t: usize, it: usize) -> Self {
+        let t: i32 = t.try_into().unwrap_or(i32::MAX);
+        let it: i32 = it.try_into().unwrap_or(i32::MAX);
+        GSSmoother::emplace(mfem::GSSmoother::new1(
+            a.as_mfem(), c_int(t), c_int(it)))
+    }
+}
+
+// TODO: make a prelude and do not include this inside.
+/// Preconditioned conjugate gradient method. (tolerances are squared)
+pub fn pcg<'a>(
+    a: &'a Operator,
+    solver: &'a mut Solver,
+    b: &'a AVector,
+    x: &'a mut AVector,
+) -> PCG<'a> {
+    PCG { a, solver, b, x,
+        print_iter: false,
+        // TODO: revisit defaults
+        max_num_iter: 200,
+        rtol: 1e-12,
+        atol: 0.0,
+    }
+}
+
+pub struct PCG<'a> {
+    a: &'a Operator,
+    solver: &'a mut Solver,
+    b: &'a AVector,
+    x: &'a mut AVector,
+    print_iter: bool,
+    max_num_iter: i32,
+    rtol: f64,
+    atol: f64,
+}
+
+impl PCG<'_> {
+    /// Print a line for each iteration.
+    pub fn print_iter(self, pr: bool) -> Self {
+        Self { print_iter: pr, .. self }
     }
 
-    pub fn height(&self) -> usize {
-        todo!()
+    pub fn max_num_iter(self, mx: usize) -> Self {
+        let max_num_iter = mx.try_into().unwrap_or(i32::MAX);
+        Self { max_num_iter, .. self }
     }
 
-    pub fn get_type(&self) -> String {
-        todo!()
+    pub fn rtol(self, rtol: f64) -> Self {
+        Self { rtol: rtol.max(0.), .. self }
+    }
+
+    pub fn atol(self, atol: f64) -> Self {
+        Self { atol: atol.max(0.), .. self }
+    }
+
+    pub fn solve(&mut self) {
+        let print_iter = if self.print_iter {1} else {0};
+        mfem::PCG(
+            self.a.as_mfem(),
+            self.solver.as_mut_mfem(),
+            self.b.as_mfem(),
+            self.x.as_mut_mfem(),
+            print_iter, self.max_num_iter,
+            self.rtol, self.atol);
     }
 }
 

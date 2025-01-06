@@ -26,6 +26,9 @@ struct Args {
     /// Finite element order (polynomial degree) or -1 for isoparametric space.
     #[arg(short, long, default_value_t = 1)]
     order: i32,
+    /// Device configuration string, see Device::Configure().
+    #[arg(short, long, default_value = "cpu")]
+    device_config: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,7 +37,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Enable hardware devices such as GPUs, and programming models
     //    such as CUDA, OCCA, RAJA and OpenMP based on command line options.
-    // TODO(mkovaxx)
+    // TODO
+    println!("{}", args.device_config);
 
     // 3. Read the mesh from the given mesh file. We can handle
     //    triangular, quadrilateral, tetrahedral, hexahedral, surface
@@ -59,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    continuous Lagrange finite elements of the specified order.
     //    If order < 1, we instead use an isoparametric/isogeometric space.
     let nodes = mesh.get_nodes();
-    let fec: &FiniteElementCollectionBase = if args.order > 0 {
+    let fec: &AFiniteElementCollection = if args.order > 0 {
         &H1_FECollection::new(args.order, dim, BasisType::GaussLobatto)
     } else if nodes.is_some() {
         &nodes.unwrap().fec()
@@ -80,18 +84,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    as essential (Dirichlet) and converting them to a list of
     //    true dofs.
     let mut ess_tdof_list = ArrayInt::new();
-    if let Some(max_bdr_attr) = mesh.bdr_attributes().iter().max() {
-        let mut ess_bdr = ArrayInt::with_len(*max_bdr_attr as usize);
+    if let Some(&max_bdr_attr) = mesh.bdr_attributes().iter().max() {
+        let mut ess_bdr = ArrayInt::with_len(max_bdr_attr as usize);
         ess_bdr.fill(1);
         fespace.get_essential_true_dofs(&ess_bdr, &mut ess_tdof_list, None);
     }
 
-    // // 7. Set up the linear form b(.) which corresponds to the
-    // //    right-hand side of the FEM linear system, which in this case
-    // //    is (1,phi_i) where phi_i are the basis functions in the
-    // //    finite element fespace.
-    let mut b = LinearForm::new(&fespace);
+    // 7. Set up the linear form b(.) which corresponds to the
+    //    right-hand side of the FEM linear system, which in this case
+    //    is (1, ϕᵢ) where ϕᵢ are the basis functions in the finite
+    //    element `fespace`.
     let mut one = ConstantCoefficient::new(1.0);
+    let mut b = LinearForm::new(&fespace);
     let integrator = DomainLFIntegrator::new(&mut one, 2, 0);
     b.add_domain_integrator(integrator);
     // drop(one); // With this, it must fail to compile.
@@ -120,29 +124,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     constraints for non-conforming AMR, static condensation, etc.
     a.assemble(true);
 
-    // let mut a_mat = OperatorHandle::new();
-    // let mut b_vec = Vector::new();
-    // let mut x_vec = Vector::new();
-    // a.form_linear_system(&ess_tdof_list, &x, &b,
-    //     &mut a_mat, &mut x_vec, &mut b_vec);
+    let mut a_mat = OperatorHandle::new();
+    let mut x_vec = Vector::new();
+    let mut b_vec = Vector::new();
+    a.form_linear_system(
+        &ess_tdof_list, &x, &b, &mut a_mat, &mut x_vec, &mut b_vec);
 
-    // println!("Size of linear system: {}", a_mat.height());
-    // dbg!(a_mat.get_type());
+    println!("Size of linear system: {}", a_mat.height());
+    dbg!(a_mat.get_type());
 
-    // // 11. Solve the linear system A X = B.
-    // // Use a simple symmetric Gauss-Seidel preconditioner with PCG.
-    // let a_sparse = SparseMatrixRef::try_from(&a_mat).expect("Operator is a SparseMatrix");
-    // let mut m_mat = GsSmoother::new(&a_sparse, 0, 1);
-    // solve_with_pcg(&a_mat, &mut m_mat, &b_vec, &mut x_vec, 1, 200, 1e-12, 0.0);
+    // 11. Solve the linear system A X = B.
+    // Use a simple symmetric Gauss-Seidel preconditioner with PCG.
+    let a_sparse: &ASparseMatrix = (&a_mat).try_into()?;
+    let mut m_mat = GSSmoother::new(a_sparse, 0, 1);
+    mfem::pcg(&a_mat, &mut m_mat, &b_vec, &mut x_vec).print_iter(true).solve();
 
     // 12. Recover the solution as a finite element grid function.
-    // a.recover_fem_solution(&x_vec, &b, &mut x);
+    a.recover_fem_solution(&x_vec, &b, &mut x);
 
     // 13. Save the refined mesh and the solution. This output can be
     //     viewed later using GLVis: "glvis -m refined.mesh -g sol.gf".
     mesh.save().to_file("refined.mesh");
-    // x.save_to_file("sol.gf", 8);
-
+    x.save().to_file("sol.gf");
 
     Ok(())
 }

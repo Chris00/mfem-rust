@@ -1,4 +1,9 @@
 /target
 *.lock
 *.btr
-*.mesh
+/*.mesh
+*.gf
+/crates/mfem/*.mesh
+crates/mfem/meshes
+Makefile
+*.org

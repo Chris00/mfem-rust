@@ -14,13 +14,16 @@ fn main() -> eyre::Result<()> {
     }
 
     mfem_config.include_dirs.push("src".into());
+    mfem_config.include_dirs.push("include".into()); // for cxx.h
     let mut b = autocxx_build::Builder::new("src/lib.rs", &mfem_config.include_dirs).build()?;
     b.flag_if_supported("-std=c++14")
+        .flag_if_supported("-O3")
         .flag_if_supported("-Wno-deprecated-declarations")
         .compile("mfem-sys");
 
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/extra.hpp");
+    println!("cargo:rerun-if-changed=src/ffi_cxx.hpp");
     Ok(())
 }
 
