@@ -1,9 +1,13 @@
 /target
-*.lock
 *.btr
-/*.mesh
+*.data
+*.data.old
 *.gf
+*.lock
+Makefile
+/*.mesh
+crates/mfem/examples/*.cpp
 /crates/mfem/*.mesh
 crates/mfem/meshes
-Makefile
 *.org
+*.svg
