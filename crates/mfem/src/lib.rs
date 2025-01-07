@@ -146,6 +146,11 @@ macro_rules! wrap_mfem {
             fn from_unique_ptr(ptr: UniquePtr<mfem:: $ty>) -> Self {
                 Self { inner: ptr,  marker: PhantomData }
             }
+            /// Consumes `self`, releasing its ownership, and returns
+            /// the pointer (to the C++ heap).
+            fn into_raw(self) -> *mut mfem::$ty {
+                self.inner.into_raw()
+            }
         }
     };
 }
@@ -168,14 +173,23 @@ macro_rules! wrap_mfem_emplace {
 trait Subclass {}
 
 macro_rules! subclass {
-    ($tysub0: ident, $tysub: ident, $ty0: ident, $ty: ident) => {
+    ($tysub0: ident < $($l: lifetime)? >, base $tysub: ident,
+        $ty0: ident, $ty: ident
+    ) => {
         // Use the fact that `autocxx` implements the `AsRef`
         // relationship for sub-classes to make sure it is safe.
         impl Subclass for $tysub
         where mfem::$tysub0 : AsRef<mfem::$ty0> {}
-        subclass!(unsafe $tysub, $ty);
+        subclass!(unsafe $tysub0 <$($l)?>, base $tysub, $ty0, $ty);
     };
-    (unsafe $tysub: ident, $ty: ident) => {
+    (unsafe $tysub0: ident < $($l: lifetime)? >, base $tysub: ident,
+        $ty0: ident, $ty: ident
+    ) => {
+        subclass!(unsafe base $tysub, $ty);
+
+        subclass!(unsafe $tysub0 <$($l)?>, into $ty0);
+    };
+    (unsafe base $tysub: ident, $ty: ident) => {
         impl ::std::ops::Deref for $tysub {
             type Target = $ty;
 
@@ -203,6 +217,46 @@ macro_rules! subclass {
             }
         }
     };
+    (unsafe $tysub0: ident < $($l: lifetime)? >, into $ty0: ident) => {
+        // For owned values, also define `Into`.
+        impl $(<$l>)? ::std::convert::Into<$ty0> for $tysub0 $(<$l>)? {
+            #[inline]
+            fn into(self) -> $ty0 {
+                unsafe {
+                    // Since our types are transparent and pointers
+                    // mfem::$tysub0 can be cast to mfem::$ty0, one can
+                    // cast unique pointers.
+                    ::std::mem::transmute::<Self, $ty0>(self)
+                }
+            }
+        }
+    };
+    // For an owned only value (no "base" type), the `Deref` to the
+    // base value of the parent class is different.
+    (owned $tysub0: ident < $($l: lifetime)? >,
+        into $ty0: ident, $ty: ident
+    ) => {
+        subclass!(unsafe $tysub0 <$($l)?>, into $ty0);
+        subclass!(owned $tysub0 <$($l)?>, $ty);
+    };
+    (owned $tysub0: ident < $($l: lifetime)? >, $ty: ident) => {
+        impl $(<$l>)? ::std::ops::Deref for $tysub0 $(<$l>)? {
+            type Target = $ty;
+
+            #[inline]
+            fn deref(&self) -> & Self::Target {
+                let ptr: & mfem::$tysub0 = self.inner.as_ref().unwrap();
+                unsafe { &*(ptr as *const mfem::$tysub0 as *const $ty) }
+            }
+        }
+        impl $(<$l>)? ::std::ops::DerefMut for $tysub0 $(<$l>)? {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                let ptr: *mut mfem::$tysub0 = self.inner.as_mut_ptr();
+                unsafe { &mut *(ptr as *mut mfem::$tysub0 as *mut $ty) }
+            }
+        }
+    }
 }
 
 // FIXME: Reverse: Array<T> if trait on T.
@@ -383,8 +437,7 @@ wrap_mfem!(
     AMatrix);
 
 // XXX Ok to do with an abstract type?
-subclass!(unsafe AMatrix, Operator);
-
+subclass!(unsafe base AMatrix, Operator);
 
 
 /// Algorithm for [`AMesh::uniform_refinement`].
@@ -498,6 +551,9 @@ pub struct MeshSave<'a> {
 
 impl MeshSave<'_> {
     // TODO: error?
+    // FIXME: This is slower than the C++ version.
+    // Rewriting in Rust may be nice (also for errors) but not a priority.
+    // See Mesh::Printer.
     pub fn to_file(&self, path: impl AsRef<Path>) {
         let_cxx_string!(
             filename = path.as_ref().as_os_str().as_encoded_bytes()
@@ -589,7 +645,7 @@ wrap_mfem!(
     base AH1_FECollection);
 wrap_mfem_emplace!(H1_FECollection<>);
 subclass!(
-    H1_FECollection,         AH1_FECollection,
+    H1_FECollection<>,         base AH1_FECollection,
     FiniteElementCollection, AFiniteElementCollection);
 
 impl H1_FECollection {
@@ -696,7 +752,7 @@ wrap_mfem!(
     GridFunction<'fes>,
     base AGridFunction);
 wrap_mfem_emplace!(GridFunction<'fes>);
-subclass!(GridFunction, AGridFunction, Vector, AVector);
+subclass!(GridFunction<'fes>, base AGridFunction, Vector, AVector);
 
 impl<'fes> GridFunction<'fes> {
     // XXX Can `fes` be mutated?
@@ -768,79 +824,45 @@ impl GridFunctionSave<'_> {
 }
 
 
-pub trait Coefficient: autocxx::PinMut<mfem::Coefficient> {
-    // TODO: Want a trait or a "base class"?
-}
+wrap_mfem_base!(Coefficient, mfem Coefficient);
 
-pub struct ConstantCoefficient {
-    inner: UniquePtr<mfem::ConstantCoefficient>,
-}
-
-impl AsRef<mfem::Coefficient> for ConstantCoefficient {
-    fn as_ref(&self) -> &mfem::Coefficient {
-        self.inner.as_ref().unwrap().as_ref()
-    }
-}
-
-impl autocxx::PinMut<mfem::Coefficient> for ConstantCoefficient {
-    fn pin_mut(&mut self) -> Pin<&mut mfem::Coefficient> {
-        unsafe {
-            let c = self.inner.pin_mut().get_unchecked_mut();
-            let c = c as *mut mfem::ConstantCoefficient;
-            let c = c as *mut mfem::Coefficient;
-            let c = &mut *c;
-            Pin::new_unchecked(c)
-        }
-    }
-}
-
-impl Coefficient for ConstantCoefficient {}
+wrap_mfem!(ConstantCoefficient<>);
+wrap_mfem_emplace!(ConstantCoefficient<>);
+subclass!(owned ConstantCoefficient<>, Coefficient);
 
 impl ConstantCoefficient {
     pub fn new(c: f64) -> Self {
-        let cc = mfem::ConstantCoefficient::new(c);
-        Self {
-            inner: UniquePtr::emplace(cc),
-        }
+        Self::emplace(mfem::ConstantCoefficient::new(c))
     }
 }
 
-/// Common capabilities of `LinarFormIntegrator`s.
-pub trait LinearFormIntegrator: Into<*mut mfem::LFI> {
-    // Since linear form integrators are taken by value by
-    // [`LinearForm::new`], there is no way to play the same as above
-    // (de-referencing to a Base struct).
+pub use mfem::IntegrationRule;
 
-    // TODO
-}
+// `LinearFormIntegrator` is an abstract class on the C// side.
+// However, it will be taken by value by some functions such as
+// `LinearForm::add_domain_integrator`.  Since
+// `mfem::LinearFormIntegrator` lives on the C++ side and so can only
+// be accessed through pointers, we define an owned type
+// `LinearFormIntegrator`.  There will be no creation (`new`) function
+// for that type but values can be produced by `Into` from owned
+// values in sub-classes.
+wrap_mfem!(
+    /// Common capabilities of `LinarFormIntegrator`s.
+    LinearFormIntegrator<>,
+    base ALinearFormIntegrator);
 
-pub struct DomainLFIntegrator<'a> {
-    inner: UniquePtr<mfem::DomainLFIntegrator>,
-    marker: PhantomData<&'a ()>,
-}
-
-impl From<DomainLFIntegrator<'_>> for *mut mfem::LFI {
-    fn from(value: DomainLFIntegrator<'_>) -> Self {
-        let dlfi = value.inner.into_raw();
-        dlfi as *mut mfem::LFI
-    }
-}
-
-impl LinearFormIntegrator for DomainLFIntegrator<'_> {}
+wrap_mfem!(DomainLFIntegrator<'a>);
+wrap_mfem_emplace!(DomainLFIntegrator<'a>);
+subclass!(owned
+    DomainLFIntegrator<'a>,
+    into LinearFormIntegrator, ALinearFormIntegrator);
 
 impl<'coeff> DomainLFIntegrator<'coeff> {
-    pub fn new<QF>(qf: &'coeff mut QF, a: i32, b: i32) -> Self
-    where
-        QF: Coefficient,
-    {
+    pub fn new(qf: &'coeff mut Coefficient, a: i32, b: i32) -> Self {
         // Safety: The result does not seem to take ownership of `qf`.
-        let qf = qf.pin_mut();
+        let qf = qf.as_mut_mfem();
         let lfi = mfem::DomainLFIntegrator::new(qf, c_int(a), c_int(b));
-        let inner = UniquePtr::emplace(lfi);
-        Self {
-            inner,
-            marker: PhantomData,
-        }
+        Self::emplace(lfi)
     }
 }
 
@@ -849,7 +871,7 @@ wrap_mfem!(
     LinearForm<'deps>,
     base ALinearForm);
 wrap_mfem_emplace!(LinearForm<'deps>);
-subclass!(LinearForm, ALinearForm, Vector, AVector);
+subclass!(LinearForm<'deps>, base ALinearForm, Vector, AVector);
 
 impl<'a> LinearForm<'a> {
     pub fn new(fes: &FiniteElementSpace<'a>) -> Self {
@@ -872,43 +894,29 @@ impl<'a> LinearForm<'a> {
     }
 
     pub fn add_domain_integrator<Lfi>(&mut self, lfi: Lfi)
-    where
-        Lfi: LinearFormIntegrator + 'a,
-    {
+    where Lfi: Into<LinearFormIntegrator> {
         // The linear form "takes ownership of `lfi`".
-        let lfi = lfi.into();
+        let lfi = lfi.into().into_raw();
         unsafe {
             self.as_mut_mfem().AddDomainIntegrator(lfi);
         }
     }
 }
 
-pub trait BilinearFormIntegrator: Into<*mut mfem::BFI> {
-    // Since bilinear form integrators are taken by value by
-    // [`BilinearForm::new`], there is no way to play the same as above
-    // (de-referencing to a Base struct).
-}
+// See `LinearFormIntegrator` for the rationale.
+wrap_mfem!(
+    /// Common capabilities of `BilinearFormIntegrator`.
+    BilinearFormIntegrator<>,
+    base ABilinearFormIntegrator);
 
-pub struct DiffusionIntegrator<'a> {
-    inner: UniquePtr<mfem::DiffusionIntegrator>,
-    marker: PhantomData<&'a ()>,
-}
-
-impl BilinearFormIntegrator for DiffusionIntegrator<'_> {}
-
-impl From<DiffusionIntegrator<'_>> for *mut mfem::BFI {
-    fn from(value: DiffusionIntegrator) -> Self {
-        let di: *mut mfem::DiffusionIntegrator = value.inner.into_raw();
-        di as *mut mfem::BFI
-    }
-}
+wrap_mfem!(DiffusionIntegrator<'a>);
+subclass!(owned
+    DiffusionIntegrator<'a>,
+    into BilinearFormIntegrator, ABilinearFormIntegrator);
 
 impl<'coeff> DiffusionIntegrator<'coeff> {
-    pub fn new<QF>(qf: &'coeff mut QF) -> Self
-    where
-        QF: Coefficient,
-    {
-        let qf = qf.pin_mut();
+    pub fn new(qf: &'coeff mut Coefficient) -> Self {
+        let qf = qf.as_mut_mfem();
         let ir: *const mfem::IntegrationRule = ptr::null();
         let bfi = unsafe { mfem::DiffusionIntegrator::new1(qf, ir) };
         Self {
@@ -922,7 +930,7 @@ wrap_mfem!(
     BilinearForm<'a>,
     base ABilinearForm);
 wrap_mfem_emplace!(BilinearForm<'a>);
-subclass!(BilinearForm, ABilinearForm, Matrix, AMatrix);
+subclass!(BilinearForm<'a>, base ABilinearForm, Matrix, AMatrix);
 
 impl<'a> BilinearForm<'a> {
     pub fn new(fes: &FiniteElementSpace<'a>) -> Self {
@@ -938,10 +946,10 @@ impl<'a> BilinearForm<'a> {
     /// Adds new Domain Integrator.
     pub fn add_domain_integrator<Bfi>(&mut self, bfi: Bfi)
     where
-        Bfi: BilinearFormIntegrator + 'a,
+        Bfi: Into<BilinearFormIntegrator>,
     {
         // Doc says: "Assumes ownership of `bfi`".
-        let bfi = bfi.into();
+        let bfi = bfi.into().into_raw();
         unsafe {
             self.as_mut_mfem().AddDomainIntegrator(bfi);
         }
@@ -1081,12 +1089,11 @@ wrap_mfem_base!(
     Solver, // No Rust constructor, only references.
     mfem Solver);
 
-// XXX FIXME: For now the subclass feature does NOT work from an owned type.
-wrap_mfem!(GSSmoother<>, base AGSSmoother);
+wrap_mfem!(GSSmoother<>);
 wrap_mfem_emplace!(GSSmoother<>);
 // FIXME: There are more subtle sub-class relationships but this one
 // is needed for now.
-subclass!(unsafe AGSSmoother, Solver);
+subclass!(owned GSSmoother<>, Solver);
 
 
 impl GSSmoother {
