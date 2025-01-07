@@ -1,5 +1,5 @@
-use autocxx::prelude::*;
-use cxx::{let_cxx_string, UniquePtr};
+use autocxx::{moveit::MakeCppStorage, prelude::*};
+use cxx::{let_cxx_string, memory::UniquePtrTarget, UniquePtr};
 use mfem_sys as mfem;
 use std::{
     convert::{From, TryFrom}, fmt, i32, io, marker::PhantomData, path::Path, pin::Pin, ptr, slice
@@ -29,6 +29,21 @@ impl From<io::Error> for Error {
     }
 }
 
+trait WrapMfem {
+    type Mfem;
+
+    /// Reinterpret the pointer `ptr` as a mutable reference.
+    unsafe fn mut_of_mfem<'a>(ptr: *mut Self::Mfem) -> &'a mut Self;
+
+    fn as_mfem(&self) -> &Self::Mfem;
+    fn as_mut_mfem(&mut self) -> Pin<&mut Self::Mfem>;
+
+    unsafe fn ref_of_mfem<'a>(ptr: *const Self::Mfem) -> &'a Self {
+        // Constraint to *mut is fine as the return is immutable.
+        Self::mut_of_mfem(ptr as *mut _)
+    }
+}
+
 /// Wrap mfem::$ty into $tymfem.  This `Deref` to this base and not
 /// inherit the C++ operations (we want to define our own to have a
 /// sleek Rusty interface).
@@ -52,36 +67,49 @@ macro_rules! wrap_mfem_base {
         pub struct $tymfem {
             inner: mfem:: $ty,
         }
-        #[allow(dead_code)]
-        impl $tymfem {
-            /// To wrap a *non-owned* pointer.
-            ///
-            /// *Safety*: Make sure the lifetime is constrained not to
-            /// exceed the life of the pointed value.
+        impl WrapMfem for $tymfem {
+            type Mfem = mfem::$ty;
+
             #[inline]
-            unsafe fn ref_of_mfem<'a>(ptr: *const mfem::$ty) -> &'a Self {
+            unsafe fn mut_of_mfem<'a>(ptr: *mut mfem::$ty) -> &'a mut Self {
                 debug_assert!(! ptr.is_null());
                 // `ptr` is a pointer to `$tymfem`.  Since the
                 // representation of `Self` is transparent, `ptr` can
                 // be seen as a reference to `Self`.
-                &*(ptr as *const $tymfem)
-            }
-            #[inline]
-            unsafe fn mut_of_mfem<'a>(ptr: *mut mfem::$ty) -> &'a mut Self {
-                debug_assert!(! ptr.is_null());
                 &mut *(ptr as *mut $tymfem)
             }
             #[inline]
             fn as_mfem(&self) -> & mfem:: $ty {
                 &self.inner
             }
-            // One cannot move (e.g. `Clone`) the returned value.
             #[inline]
             fn as_mut_mfem(&mut self) -> Pin<&mut mfem:: $ty> {
                 unsafe { Pin::new_unchecked(&mut self.inner) }
             }
         }
     };
+}
+
+trait OwnedMfem {
+    type Mfem: UniquePtrTarget;
+
+    /// Return an *owned* value, from the pointer `ptr`.
+    fn from_unique_ptr(ptr: UniquePtr<Self::Mfem>) -> Self;
+
+    /// Consumes `self`, releasing its ownership, and returns the
+    /// pointer (to the C++ heap).
+    fn into_raw(self) -> *mut Self::Mfem;
+
+    #[inline]
+    fn emplace<N>(n: N) -> Self
+    where
+        N: New<Output = Self::Mfem>,
+        Self::Mfem: MakeCppStorage,
+        Self: Sized,
+    {
+        let ptr = UniquePtr::emplace(n);
+        Self::from_unique_ptr(ptr)
+    }
 }
 
 /// Define an struct owning the value `mfem::$ty`.
@@ -93,16 +121,24 @@ macro_rules! wrap_mfem {
         wrap_mfem!(defstruct $(#[$doc])* $ty <$($l)?>);
         wrap_mfem_base!($(#[$docmfem])* $tymfem, mfem $ty);
         // Deref to the base.
-        impl $(<$l>)? ::std::ops::Deref for $ty $(<$l>)? {
+        impl $(<$l>)? ::std::ops::Deref for $ty $(<$l>)?
+        where
+            Self: OwnedMfem<Mfem = mfem::$ty>,
+            $tymfem: WrapMfem<Mfem = mfem::$ty>
+        {
             type Target = $tymfem;
 
             #[inline]
             fn deref(&self) -> &Self::Target {
-                let ptr: & mfem:: $ty = self.inner.as_ref().unwrap();
-                unsafe { $tymfem::ref_of_mfem(ptr) }
+                let ptr: & mfem::$ty = self.inner.as_ref().unwrap();
+                unsafe { $tymfem::ref_of_mfem(ptr as *const _) }
             }
         }
-        impl $(<$l>)? ::std::ops::DerefMut for $ty $(<$l>)? {
+        impl $(<$l>)? ::std::ops::DerefMut for $ty $(<$l>)?
+        where
+            Self: OwnedMfem<Mfem = mfem::$ty>,
+            $tymfem: WrapMfem<Mfem = mfem::$ty>
+        {
             #[inline]
             fn deref_mut(&mut self) -> &mut Self::Target {
                 let ptr: *mut mfem::$ty = self.inner.as_mut_ptr();
@@ -115,10 +151,11 @@ macro_rules! wrap_mfem {
         wrap_mfem!(defstruct $(#[$doc])* $ty <$($l)?>);
         // No base type.  Provide the facilities to access the
         // underlying value.
-        #[allow(dead_code)]
-        impl $(<$l>)? $ty $(<$l>)? {
+        #[allow(dead_code, private_bounds)]
+        impl $(<$l>)? $ty $(<$l>)?
+        where Self: OwnedMfem<Mfem = mfem::$ty> {
             #[inline]
-            fn as_mfem(&self) -> & mfem:: $ty {
+            fn as_mfem(&self) -> & mfem::$ty {
                 &self.inner.as_ref().unwrap()
             }
             // One cannot move (e.g. `Clone`) the returned value.
@@ -128,7 +165,6 @@ macro_rules! wrap_mfem {
             }
         }
     };
-
     (defstruct $(#[$doc: meta])* $ty: ident < $($l: lifetime)? >) => {
         // This is basically a `UniquePtr` but with a nicer name and a
         // possible lifetime parameter to track dependencies.
@@ -139,31 +175,14 @@ macro_rules! wrap_mfem {
             inner: UniquePtr<mfem:: $ty>,
             marker: PhantomData<$(&$l)? ()>,
         }
-        #[allow(dead_code)]
-        impl $(<$l>)? $ty $(<$l>)? {
-            /// Return an *owned* value, from the pointer `ptr`.
+        impl $(<$l>)? OwnedMfem for $ty $(<$l>)? {
+            type Mfem = mfem::$ty;
             #[inline]
             fn from_unique_ptr(ptr: UniquePtr<mfem:: $ty>) -> Self {
                 Self { inner: ptr,  marker: PhantomData }
             }
-            /// Consumes `self`, releasing its ownership, and returns
-            /// the pointer (to the C++ heap).
-            fn into_raw(self) -> *mut mfem::$ty {
-                self.inner.into_raw()
-            }
-        }
-    };
-}
-
-macro_rules! wrap_mfem_emplace {
-    ($ty: ident < $($l: lifetime)? >) => {
-        impl $(<$l>)? $ty $(<$l>)? {
             #[inline]
-            fn emplace<N>(n: N) -> Self
-            where N: New<Output = mfem:: $ty> {
-                let inner = UniquePtr::emplace(n);
-                Self { inner,  marker: PhantomData }
-            }
+            fn into_raw(self) -> *mut mfem::$ty { self.inner.into_raw() }
         }
     };
 }
@@ -172,6 +191,20 @@ macro_rules! wrap_mfem_emplace {
 #[allow(dead_code)]
 trait Subclass {}
 
+// Let A (resp. B) be types owning classes A (resp. B).  Possibly A
+// (resp. B) has a "base type" AA (resp. AB).
+//
+// If A is a subclass of B, we define:
+
+// - If AA and AB exists (in which case there are deref(&A) -> &AA and
+//   deref_mut(&mut A) -> &mut AA and the same for B), we implement:
+//   - deref(&AA) -> &AB
+//   - deref_mut(&mut AA) -> &mut AB
+// - If A is a type without a "base" AA:
+//   - deref(&A) -> &AB
+//   - deref_mut(&mut A) -> &mut AB
+// - For owned types:
+//   - into(A) -> B
 macro_rules! subclass {
     ($tysub0: ident < $($l: lifetime)? >, base $tysub: ident,
         $ty0: ident, $ty: ident
@@ -186,11 +219,11 @@ macro_rules! subclass {
         $ty0: ident, $ty: ident
     ) => {
         subclass!(unsafe base $tysub, $ty);
-
         subclass!(unsafe $tysub0 <$($l)?>, into $ty0);
     };
     (unsafe base $tysub: ident, $ty: ident) => {
-        impl ::std::ops::Deref for $tysub {
+        impl ::std::ops::Deref for $tysub
+        where $tysub: WrapMfem, $ty: WrapMfem {
             type Target = $ty;
 
             #[inline]
@@ -207,7 +240,8 @@ macro_rules! subclass {
                 }
             }
         }
-        impl ::std::ops::DerefMut for $tysub {
+        impl ::std::ops::DerefMut for $tysub
+        where $tysub: WrapMfem, $ty: WrapMfem {
             #[inline]
             fn deref_mut(&mut self) -> &mut Self::Target {
                 unsafe {
@@ -219,7 +253,8 @@ macro_rules! subclass {
     };
     (unsafe $tysub0: ident < $($l: lifetime)? >, into $ty0: ident) => {
         // For owned values, also define `Into`.
-        impl $(<$l>)? ::std::convert::Into<$ty0> for $tysub0 $(<$l>)? {
+        impl $(<$l>)? ::std::convert::Into<$ty0> for $tysub0 $(<$l>)?
+        where $tysub0 $(<$l>)? : OwnedMfem, $ty0: OwnedMfem {
             #[inline]
             fn into(self) -> $ty0 {
                 unsafe {
@@ -240,7 +275,8 @@ macro_rules! subclass {
         subclass!(owned $tysub0 <$($l)?>, $ty);
     };
     (owned $tysub0: ident < $($l: lifetime)? >, $ty: ident) => {
-        impl $(<$l>)? ::std::ops::Deref for $tysub0 $(<$l>)? {
+        impl $(<$l>)? ::std::ops::Deref for $tysub0 $(<$l>)?
+        where $tysub0 $(<$l>)? : OwnedMfem, $ty: WrapMfem {
             type Target = $ty;
 
             #[inline]
@@ -249,7 +285,8 @@ macro_rules! subclass {
                 unsafe { &*(ptr as *const mfem::$tysub0 as *const $ty) }
             }
         }
-        impl $(<$l>)? ::std::ops::DerefMut for $tysub0 $(<$l>)? {
+        impl $(<$l>)? ::std::ops::DerefMut for $tysub0 $(<$l>)?
+        where $tysub0 $(<$l>)? : OwnedMfem, $ty: WrapMfem {
             #[inline]
             fn deref_mut(&mut self) -> &mut Self::Target {
                 let ptr: *mut mfem::$tysub0 = self.inner.as_mut_ptr();
@@ -329,7 +366,6 @@ wrap_mfem!(
     /// Base type to which all structs that can be considered as vectors
     /// [`Deref`][::std::ops::Deref].
     AVector);
-wrap_mfem_emplace!(Vector<>);
 
 impl std::ops::Deref for AVector {
     type Target = [f64];
@@ -452,7 +488,6 @@ pub enum RefAlgo {
 }
 
 wrap_mfem!(Mesh<>, base AMesh);
-wrap_mfem_emplace!(Mesh<>);
 
 impl Default for Mesh {
     fn default() -> Self {
@@ -643,7 +678,6 @@ wrap_mfem!(
     #[allow(non_camel_case_types)]
     H1_FECollection<>,
     base AH1_FECollection);
-wrap_mfem_emplace!(H1_FECollection<>);
 subclass!(
     H1_FECollection<>,         base AH1_FECollection,
     FiniteElementCollection, AFiniteElementCollection);
@@ -751,7 +785,6 @@ wrap_mfem!(
     /// Represent a [`Vector`] with associated FE space.
     GridFunction<'fes>,
     base AGridFunction);
-wrap_mfem_emplace!(GridFunction<'fes>);
 subclass!(GridFunction<'fes>, base AGridFunction, Vector, AVector);
 
 impl<'fes> GridFunction<'fes> {
@@ -827,7 +860,6 @@ impl GridFunctionSave<'_> {
 wrap_mfem_base!(Coefficient, mfem Coefficient);
 
 wrap_mfem!(ConstantCoefficient<>);
-wrap_mfem_emplace!(ConstantCoefficient<>);
 subclass!(owned ConstantCoefficient<>, Coefficient);
 
 impl ConstantCoefficient {
@@ -852,7 +884,6 @@ wrap_mfem!(
     base ALinearFormIntegrator);
 
 wrap_mfem!(DomainLFIntegrator<'a>);
-wrap_mfem_emplace!(DomainLFIntegrator<'a>);
 subclass!(owned
     DomainLFIntegrator<'a>,
     into LinearFormIntegrator, ALinearFormIntegrator);
@@ -870,7 +901,6 @@ wrap_mfem!(
     /// Vector with associated FE space and [`LinearFormIntegrator`]s.
     LinearForm<'deps>,
     base ALinearForm);
-wrap_mfem_emplace!(LinearForm<'deps>);
 subclass!(LinearForm<'deps>, base ALinearForm, Vector, AVector);
 
 impl<'a> LinearForm<'a> {
@@ -929,7 +959,6 @@ impl<'coeff> DiffusionIntegrator<'coeff> {
 wrap_mfem!(
     BilinearForm<'a>,
     base ABilinearForm);
-wrap_mfem_emplace!(BilinearForm<'a>);
 subclass!(BilinearForm<'a>, base ABilinearForm, Matrix, AMatrix);
 
 impl<'a> BilinearForm<'a> {
@@ -1005,7 +1034,6 @@ wrap_mfem!(
     /// to be used in bilinear forms, gradients of nonlinear forms,
     /// static condensation, hybridization, etc.
     OperatorHandle<>, base AOperatorHandle);
-wrap_mfem_emplace!(OperatorHandle<>);
 
 // `OperatorHandle` is NOT a subclass of `Operator` but contains a
 // pointer to an operator.  However, in C++, the operator *
@@ -1090,7 +1118,6 @@ wrap_mfem_base!(
     mfem Solver);
 
 wrap_mfem!(GSSmoother<>);
-wrap_mfem_emplace!(GSSmoother<>);
 // FIXME: There are more subtle sub-class relationships but this one
 // is needed for now.
 subclass!(owned GSSmoother<>, Solver);
