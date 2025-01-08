@@ -222,6 +222,13 @@ macro_rules! subclass {
         subclass!(unsafe base $tysub, $ty);
         subclass!(unsafe $tysub0 <$($l)?>, into $ty0);
     };
+    // In the following case, the parent class does not have an owned
+    // representation, only a thin wrapper.
+    ($tysub0: ident < $($l: lifetime)? >, base $tysub: ident, $ty: ident) => {
+        impl Subclass for $tysub
+        where mfem::$tysub0 : AsRef<mfem::$ty> {}
+        subclass!(unsafe base $tysub, $ty);
+    };
     (unsafe base $tysub: ident, $ty: ident) => {
         impl ::std::ops::Deref for $tysub
         where $tysub: WrapMfem, $ty: WrapMfem {
@@ -926,6 +933,24 @@ impl FunctionCoefficient {
         let d = &mut f as *mut F as *mut mfem::c_void;
         let fc = unsafe { mfem::new_FunctionCoefficient(eval, d) };
         FunctionCoefficient::from_unique_ptr(fc)
+    }
+}
+
+wrap_mfem!(
+    /// Coefficient defined by a GridFunction. This coefficient is
+    /// mesh dependent.
+    GridFunctionCoefficient<'gf>,
+    base AGridFunctionCoefficient);
+subclass!(
+    GridFunctionCoefficient<'gf>, base AGridFunctionCoefficient,
+    Coefficient);
+
+impl<'gf> GridFunctionCoefficient<'gf> {
+    pub fn new(gf: &'gf AGridFunction) -> Self {
+        unsafe {
+            Self::emplace(mfem::GridFunctionCoefficient::new1(
+                gf.as_mfem(), c_int(1)))
+        }
     }
 }
 

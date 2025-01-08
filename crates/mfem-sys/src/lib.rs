@@ -55,6 +55,7 @@ include_cpp! {
     generate!("mfem::Coefficient")
     generate!("mfem::ConstantCoefficient")
     generate!("mfem::FunctionCoefficient")
+    generate!("mfem::GridFunctionCoefficient")
     generate!("mfem::InnerProductCoefficient")
     generate!("mfem::VectorCoefficient")
     generate!("mfem::VectorConstantCoefficient")
