@@ -29,7 +29,12 @@ include_cpp! {
     generate!("mfem::Mesh")
     generate!("mfem::FiniteElement")
     generate!("mfem::FiniteElementCollection")
+    generate!("mfem::L2_FECollection")
     generate!("mfem::H1_FECollection")
+    generate!("mfem::H1_Trace_FECollection")
+    generate!("mfem::RT_FECollection")
+    generate!("mfem::ND_FECollection")
+    generate!("mfem::CrouzeixRaviartFECollection")
     // `FiniteElementSpace` contains protected types which are not
     // handled well.  Thus, one must bind by hand.
     // generate!("mfem::FiniteElementSpace")
@@ -46,16 +51,24 @@ include_cpp! {
     generate!("mfem::BilinearForm")
     generate!("extra::BilinearForm_FormLinearSystem")
     generate!("mfem::MixedBilinearForm")
+
     generate!("mfem::Coefficient")
     generate!("mfem::ConstantCoefficient")
+    generate!("mfem::FunctionCoefficient")
+    generate!("mfem::InnerProductCoefficient")
+    generate!("mfem::VectorCoefficient")
+    generate!("mfem::VectorConstantCoefficient")
+    generate!("mfem::VectorFunctionCoefficient")
 
     generate!("mfem::OperatorHandle")
     // mfem::LinearFormIntegrator is an abstract class.
     generate!("extra::LFI")
+    generate!("mfem::DeltaLFIntegrator")
     generate!("mfem::DomainLFIntegrator")
     // mfem::BilinearFormIntegrator is an abstract class.
     generate!("extra::BFI")
     generate!("mfem::DiffusionIntegrator")
+    generate!("mfem::ConvectionIntegrator")
 
     generate!("mfem::SparseMatrix")
     generate!("mfem::Solver")
@@ -88,6 +101,16 @@ mod ffi_cxx {
         unsafe fn RecoverFEMSolution(
             self: Pin<&mut Operator>,
             X: &Vector, b: &Vector, x: Pin<&mut Vector>);
+
+        // autocxx does not bind any constructor of `FunctionCoefficient`.
+        // Moreover, we "enhance" the interface to allow to pass closures.
+        #[namespace = "mfem"]
+        type FunctionCoefficient = crate::FunctionCoefficient;
+        type c_void;
+        unsafe fn new_FunctionCoefficient(
+            f: unsafe fn(&Vector, data: *mut c_void) -> f64,
+            data: *mut c_void,
+        ) -> UniquePtr<FunctionCoefficient>;
 
         #[namespace = "mfem"]
         type Matrix = crate::Matrix;
@@ -129,6 +152,7 @@ pub use ffi::extra::*;
 pub use ffi::mfem::*;
 pub use ffi_cxx::{
     Matrix_to_operator, Matrix_to_operator_mut,
+    c_void, new_FunctionCoefficient,
     Operator, OperatorHandle_operator, OperatorHandle_operator_mut,
     OperatorHandle_SparseMatrix,
     PCG,

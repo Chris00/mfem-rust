@@ -28,5 +28,18 @@ SparseMatrix const& OperatorHandle_SparseMatrix(OperatorHandle const& x) {
     return *x.As<SparseMatrix>();
 }
 
+using c_void = void;
+
+std::unique_ptr<FunctionCoefficient>
+new_FunctionCoefficient(rust::Fn<double(mfem::Vector const &, void*)> f,
+                        void *d)
+{
+  std::function<real_t(const Vector &)> F =
+      [d = std::move(d), f = std::move(f)](mfem::Vector const &x) {
+      return f(x, d);
+  };
+  return std::make_unique<FunctionCoefficient>(F);
+}
+
 
 #endif // FFI_CXX_H

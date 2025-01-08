@@ -170,6 +170,7 @@ macro_rules! wrap_mfem {
         // possible lifetime parameter to track dependencies.
         $(#[$doc])*
         #[must_use]
+        #[allow(non_camel_case_types)]
         #[repr(transparent)]
         pub struct $ty $(<$l>)? {
             inner: UniquePtr<mfem:: $ty>,
@@ -324,6 +325,9 @@ impl std::ops::Deref for AArrayInt {
 }
 
 impl std::ops::DerefMut for AArrayInt {
+    // Dereferencing to a mutable slice does not allow to move the
+    // target because the slice is not `Sized` (so, for example,
+    // `swap` cannot be used).
     #[inline]
     fn deref_mut(&mut self) -> &mut [i32] {
         let len = self.len();
@@ -569,6 +573,10 @@ impl AMesh {
         }
     }
 
+    // fn get_mut_nodes should wrap the return value (deref to
+    // GridFunction) so that a custom Drop is executed that calls
+    // Mesh::NodesUpdated()
+
     /// Save the mesh to the file `path`.  The given precision will be
     /// used for ASCII output.
     pub fn save(&self) -> MeshSave<'_> {
@@ -675,11 +683,10 @@ impl AFiniteElementCollection {
 wrap_mfem!(
     /// Arbitrary order H1-conforming (continuous) finite element.
     /// Implements [`FiniteElementCollection`].
-    #[allow(non_camel_case_types)]
     H1_FECollection<>,
     base AH1_FECollection);
 subclass!(
-    H1_FECollection<>,         base AH1_FECollection,
+    H1_FECollection<>, base AH1_FECollection,
     FiniteElementCollection, AFiniteElementCollection);
 
 impl H1_FECollection {
@@ -725,6 +732,41 @@ impl AH1_FECollection {
         self.as_mfem().GetBasisType().try_into().ok()
     }
 }
+
+wrap_mfem!(
+    /// Arbitrary order L²2-conforming discontinuous finite elements.
+    L2_FECollection<>);
+subclass!(owned L2_FECollection<>, AFiniteElementCollection);
+
+
+wrap_mfem!(
+    /// Arbitrary order "H^{1/2}-conforming" trace finite elements
+    /// defined on the interface between mesh elements
+    /// (faces,edges,vertices); these are the trace FEs of the
+    /// H1-conforming FEs.
+    H1_Trace_FECollection<>);
+subclass!(owned H1_Trace_FECollection<>, AH1_FECollection);
+
+wrap_mfem!(
+    /// Arbitrary order H(div)-conforming Raviart-Thomas finite elements.
+    RT_FECollection<>,
+    base ART_FECollection);
+subclass!(
+    RT_FECollection<>, base ART_FECollection,
+    FiniteElementCollection, AFiniteElementCollection);
+
+wrap_mfem!(
+    /// Arbitrary order H(curl)-conforming Nedelec finite elements.
+    ND_FECollection<>,
+    base AND_FECollection);
+subclass!(
+    ND_FECollection<>, base AND_FECollection,
+    FiniteElementCollection, AFiniteElementCollection);
+
+wrap_mfem!(
+    /// Crouzeix-Raviart nonconforming elements in 2D.
+    CrouzeixRaviartFECollection<>);
+subclass!(owned CrouzeixRaviartFECollection<>, AFiniteElementCollection);
 
 pub enum Ordering {
     ByNodes = mfem::Ordering_Type::byNODES as isize,
@@ -868,6 +910,54 @@ impl ConstantCoefficient {
     }
 }
 
+wrap_mfem!(
+    /// A general function coefficient.
+    FunctionCoefficient<>);
+subclass!(owned FunctionCoefficient<>, Coefficient);
+
+impl FunctionCoefficient {
+    pub fn new<F>(mut f: F) -> Self
+    where F: FnMut(&AVector) -> f64 {
+        let eval = |x: &mfem::Vector, d: *mut mfem::c_void| -> f64 {
+            let f = unsafe { &mut *(d as *mut F) };
+            let x = unsafe { AVector::ref_of_mfem(x) };
+            f(x)
+        };
+        let d = &mut f as *mut F as *mut mfem::c_void;
+        let fc = unsafe { mfem::new_FunctionCoefficient(eval, d) };
+        FunctionCoefficient::from_unique_ptr(fc)
+    }
+}
+
+wrap_mfem!(
+    /// Scalar coefficient defined as the inner product of two vector
+    /// coefficients.
+    InnerProductCoefficient<>);
+subclass!(owned InnerProductCoefficient<>, Coefficient);
+
+wrap_mfem_base!(
+    /// Base type for vector Coefficients that optionally depend on
+    /// time and space.
+    VectorCoefficient, mfem VectorCoefficient);
+
+wrap_mfem!(
+    /// Vector coefficient that is constant in space and time.
+    VectorConstantCoefficient<>);
+subclass!(owned VectorConstantCoefficient<>, VectorCoefficient);
+
+impl VectorConstantCoefficient {
+    pub fn new(x: &AVector) -> Self {
+        Self::emplace(mfem::VectorConstantCoefficient::new(x.as_mfem()))
+    }
+}
+
+wrap_mfem!(
+    /// A general vector function coefficient.
+    VectorFunctionCoefficient<>);
+subclass!(owned VectorFunctionCoefficient<>, VectorCoefficient);
+
+
+
 pub use mfem::IntegrationRule;
 
 // `LinearFormIntegrator` is an abstract class on the C// side.
@@ -883,10 +973,21 @@ wrap_mfem!(
     LinearFormIntegrator<>,
     base ALinearFormIntegrator);
 
-wrap_mfem!(DomainLFIntegrator<'a>);
+wrap_mfem!(
+    /// Represent a general integrator that supports delta coefficients.
+    DeltaLFIntegrator<>,
+    base ADeltaLFIntegrator);
+subclass!(
+    DeltaLFIntegrator<>, base ADeltaLFIntegrator,
+    LinearFormIntegrator, ALinearFormIntegrator);
+
+wrap_mfem!(
+    /// Type for domain integration L(v) := ∫ fv.
+    DomainLFIntegrator<'a>);
 subclass!(owned
     DomainLFIntegrator<'a>,
-    into LinearFormIntegrator, ALinearFormIntegrator);
+    into DeltaLFIntegrator, ADeltaLFIntegrator);
+
 
 impl<'coeff> DomainLFIntegrator<'coeff> {
     pub fn new(qf: &'coeff mut Coefficient, a: i32, b: i32) -> Self {
@@ -939,7 +1040,9 @@ wrap_mfem!(
     BilinearFormIntegrator<>,
     base ABilinearFormIntegrator);
 
-wrap_mfem!(DiffusionIntegrator<'a>);
+wrap_mfem!(
+    /// α(Q ∇u, ∇v)
+    DiffusionIntegrator<'a>);
 subclass!(owned
     DiffusionIntegrator<'a>,
     into BilinearFormIntegrator, ABilinearFormIntegrator);
@@ -955,6 +1058,13 @@ impl<'coeff> DiffusionIntegrator<'coeff> {
         }
     }
 }
+
+wrap_mfem!(
+    /// α(Q·∇u, v)
+    ConvectionIntegrator<'a>);
+subclass!(owned ConvectionIntegrator<'a>,
+    into BilinearFormIntegrator, ABilinearFormIntegrator);
+
 
 wrap_mfem!(
     BilinearForm<'a>,

@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    is (1, ϕᵢ) where ϕᵢ are the basis functions in the finite
     //    element `fespace`.
     let mut one = ConstantCoefficient::new(1.0);
+    // let mut one = FunctionCoefficient::new(|_| 1.0);
     let mut b = LinearForm::new(&fespace);
     let integrator = DomainLFIntegrator::new(&mut one, 2, 0);
     b.add_domain_integrator(integrator);
