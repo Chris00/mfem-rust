@@ -207,20 +207,24 @@ trait Subclass {}
 // - For owned types:
 //   - into(A) -> B
 macro_rules! subclass {
+    // If a lifetime is givent to parent value `$ty0` it must be the
+    // same as `$l` and signals the the dependencies `$l` tracks are
+    // still needed for `ty0`.
     ($tysub0: ident < $($l: lifetime)? >, base $tysub: ident,
-        $ty0: ident, $ty: ident
+        $ty0: ident < $($lparent: lifetime)? >, $ty: ident
     ) => {
         // Use the fact that `autocxx` implements the `AsRef`
         // relationship for sub-classes to make sure it is safe.
         impl Subclass for $tysub
         where mfem::$tysub0 : AsRef<mfem::$ty0> {}
-        subclass!(unsafe $tysub0 <$($l)?>, base $tysub, $ty0, $ty);
+        subclass!(unsafe $tysub0 <$($l)?>, base $tysub,
+            $ty0 <$($lparent)?>, $ty);
     };
     (unsafe $tysub0: ident < $($l: lifetime)? >, base $tysub: ident,
-        $ty0: ident, $ty: ident
+        $ty0: ident < $($lparent: lifetime)? >, $ty: ident
     ) => {
         subclass!(unsafe base $tysub, $ty);
-        subclass!(unsafe $tysub0 <$($l)?>, into $ty0);
+        subclass!(unsafe $tysub0 <$($l)?>, into $ty0 <$($lparent)?>);
     };
     // In the following case, the parent class does not have an owned
     // representation, only a thin wrapper.
@@ -259,12 +263,17 @@ macro_rules! subclass {
             }
         }
     };
-    (unsafe $tysub0: ident < $($l: lifetime)? >, into $ty0: ident) => {
-        // For owned values, also define `Into`.
-        impl $(<$l>)? ::std::convert::Into<$ty0> for $tysub0 $(<$l>)?
-        where $tysub0 $(<$l>)? : OwnedMfem, $ty0: OwnedMfem {
+    (unsafe $tysub0: ident < $($l: lifetime)? >,
+        into $ty0: ident < $($lparent: lifetime)? >
+    ) => {
+        // For owned values, also define `Into`.  Note that the
+        // lifetimes may of may not need be preserved depending on
+        // whether the dependencies theiy track are still needed.
+        impl $(<$l>)? ::std::convert::Into<$ty0 $(<$lparent>)?>
+        for $tysub0 $(<$l>)?
+        where $tysub0 $(<$l>)? : OwnedMfem, $ty0 $(<$lparent>)?: OwnedMfem {
             #[inline]
-            fn into(self) -> $ty0 {
+            fn into(self) -> $ty0 $(<$lparent>)? {
                 unsafe {
                     // Since our types are transparent and pointers
                     // mfem::$tysub0 can be cast to mfem::$ty0, one can
@@ -277,9 +286,9 @@ macro_rules! subclass {
     // For an owned only value (no "base" type), the `Deref` to the
     // base value of the parent class is different.
     (owned $tysub0: ident < $($l: lifetime)? >,
-        into $ty0: ident, $ty: ident
+        into $ty0: ident < $($lparent: lifetime)? >, $ty: ident
     ) => {
-        subclass!(unsafe $tysub0 <$($l)?>, into $ty0);
+        subclass!(unsafe $tysub0 <$($l)?>, into $ty0 <$($lparent)?>);
         subclass!(owned $tysub0 <$($l)?>, $ty);
     };
     (owned $tysub0: ident < $($l: lifetime)? >, $ty: ident) => {
@@ -829,18 +838,14 @@ wrap_mfem!(
     base AH1_FECollection);
 subclass!(
     H1_FECollection<>, base AH1_FECollection,
-    FiniteElementCollection, AFiniteElementCollection);
+    FiniteElementCollection<>, AFiniteElementCollection);
 
 impl H1_FECollection {
     /// Return a H1-conforming (continuous) finite elements with order
-    /// `p`, dimension `dim` and basis type `btype`.
-    pub fn new(p: i32, dim: i32, btype: BasisType) -> Self {
-        let h1 = mfem::H1_FECollection::new(
-            c_int(p),
-            c_int(dim),
-            c_int(btype as i32),
-        );
-        H1_FECollection::emplace(h1)
+    /// `p`, dimension `dim` and the default basis type
+    /// [`GaussLobatto`][BasisType::GaussLobatto].
+    pub fn new(p: i32, dim: i32) -> Self {
+        Self::with_basis(p, dim, BasisType::GaussLobatto)
     }
 
     /// Return a H1-conforming (continuous) finite elements with
@@ -895,7 +900,7 @@ wrap_mfem!(
     base ART_FECollection);
 subclass!(
     RT_FECollection<>, base ART_FECollection,
-    FiniteElementCollection, AFiniteElementCollection);
+    FiniteElementCollection<>, AFiniteElementCollection);
 
 wrap_mfem!(
     /// Arbitrary order H(curl)-conforming Nedelec finite elements.
@@ -903,7 +908,7 @@ wrap_mfem!(
     base AND_FECollection);
 subclass!(
     ND_FECollection<>, base AND_FECollection,
-    FiniteElementCollection, AFiniteElementCollection);
+    FiniteElementCollection<>, AFiniteElementCollection);
 
 wrap_mfem!(
     /// Crouzeix-Raviart nonconforming elements in 2D.
@@ -969,7 +974,11 @@ wrap_mfem!(
     /// Represent a [`Vector`] with associated FE space.
     GridFunction<'fes>,
     base AGridFunction);
-subclass!(GridFunction<'fes>, base AGridFunction, Vector, AVector);
+subclass!(
+    GridFunction<'fes>, base AGridFunction,
+    // FIXME: Does the reinterpretation as a vector no longer need the
+    // space?  Freed correctly?
+    Vector<>, AVector);
 
 impl<'fes> GridFunction<'fes> {
     // XXX Can `fes` be mutated?
@@ -1130,23 +1139,24 @@ pub use mfem::IntegrationRule;
 // values in sub-classes.
 wrap_mfem!(
     /// Common capabilities of `LinarFormIntegrator`s.
-    LinearFormIntegrator<>,
+    LinearFormIntegrator<'deps>,
     base ALinearFormIntegrator);
 
 wrap_mfem!(
     /// Represent a general integrator that supports delta coefficients.
-    DeltaLFIntegrator<>,
+    DeltaLFIntegrator<'deps>,
     base ADeltaLFIntegrator);
 subclass!(
-    DeltaLFIntegrator<>, base ADeltaLFIntegrator,
-    LinearFormIntegrator, ALinearFormIntegrator);
+    DeltaLFIntegrator<'deps>, base ADeltaLFIntegrator,
+    LinearFormIntegrator<'deps>, ALinearFormIntegrator);
 
 wrap_mfem!(
     /// Type for domain integration L(v) := ∫ fv.
-    DomainLFIntegrator<'a>);
+    DomainLFIntegrator<'deps>);
 subclass!(owned
-    DomainLFIntegrator<'a>,
-    into DeltaLFIntegrator, ADeltaLFIntegrator);
+    DomainLFIntegrator<'deps>,
+    into DeltaLFIntegrator<'deps>, ADeltaLFIntegrator);
+subclass!(unsafe DomainLFIntegrator<'deps>, into LinearFormIntegrator<'deps>);
 
 
 impl<'coeff> DomainLFIntegrator<'coeff> {
@@ -1162,7 +1172,10 @@ wrap_mfem!(
     /// Vector with associated FE space and [`LinearFormIntegrator`]s.
     LinearForm<'deps>,
     base ALinearForm);
-subclass!(LinearForm<'deps>, base ALinearForm, Vector, AVector);
+subclass!(
+    LinearForm<'deps>, base ALinearForm,
+    // FIXME: Can drop the deps?
+    Vector<>, AVector);
 
 impl<'a> LinearForm<'a> {
     pub fn new(fes: &FiniteElementSpace<'a>) -> Self {
@@ -1184,8 +1197,8 @@ impl<'a> LinearForm<'a> {
         self.as_mut_mfem().Assemble();
     }
 
-    pub fn add_domain_integrator<Lfi>(&mut self, lfi: Lfi)
-    where Lfi: Into<LinearFormIntegrator> {
+    pub fn add_domain_integrator<'b: 'a, Lfi>(&mut self, lfi: Lfi)
+    where Lfi: Into<LinearFormIntegrator<'b>> {
         // The linear form "takes ownership of `lfi`".
         let lfi = lfi.into().into_raw();
         unsafe {
@@ -1197,7 +1210,7 @@ impl<'a> LinearForm<'a> {
 // See `LinearFormIntegrator` for the rationale.
 wrap_mfem!(
     /// Common capabilities of `BilinearFormIntegrator`.
-    BilinearFormIntegrator<>,
+    BilinearFormIntegrator<'a>,
     base ABilinearFormIntegrator);
 
 wrap_mfem!(
@@ -1205,7 +1218,7 @@ wrap_mfem!(
     DiffusionIntegrator<'a>);
 subclass!(owned
     DiffusionIntegrator<'a>,
-    into BilinearFormIntegrator, ABilinearFormIntegrator);
+    into BilinearFormIntegrator<'a>, ABilinearFormIntegrator);
 
 impl<'coeff> DiffusionIntegrator<'coeff> {
     pub fn new(qf: &'coeff mut Coefficient) -> Self {
@@ -1223,13 +1236,16 @@ wrap_mfem!(
     /// α(Q·∇u, v)
     ConvectionIntegrator<'a>);
 subclass!(owned ConvectionIntegrator<'a>,
-    into BilinearFormIntegrator, ABilinearFormIntegrator);
+    into BilinearFormIntegrator<'a>, ABilinearFormIntegrator);
 
 
 wrap_mfem!(
     BilinearForm<'a>,
     base ABilinearForm);
-subclass!(BilinearForm<'a>, base ABilinearForm, Matrix, AMatrix);
+subclass!(
+    BilinearForm<'a>, base ABilinearForm,
+    // FIXME: Ok to drop the dependencies lifetime?
+    Matrix<>, AMatrix);
 
 impl<'a> BilinearForm<'a> {
     pub fn new(fes: &FiniteElementSpace<'a>) -> Self {
@@ -1243,10 +1259,8 @@ impl<'a> BilinearForm<'a> {
     }
 
     /// Adds new Domain Integrator.
-    pub fn add_domain_integrator<Bfi>(&mut self, bfi: Bfi)
-    where
-        Bfi: Into<BilinearFormIntegrator>,
-    {
+    pub fn add_domain_integrator<'b: 'a, Bfi>(&mut self, bfi: Bfi)
+    where Bfi: Into<BilinearFormIntegrator<'b>> {
         // Doc says: "Assumes ownership of `bfi`".
         let bfi = bfi.into().into_raw();
         unsafe {
@@ -1486,4 +1500,17 @@ mod tests {
     //     let mesh = Mesh::from_file("m.mesh");
     //     assert!(mesh.is_err());
     // }
+
+    #[test]
+    fn test_grid_function_lifetime() -> Result<(), Box<dyn std::error::Error>> {
+        let mesh = Mesh::cartesian2d(50, 50, ElementType::Triangle).make();
+        let fec = H1_FECollection::new(1, 2);
+        let fespace = FiniteElementSpace::new(&mesh, &fec);
+        let mut x = GridFunction::new(&fespace);
+        x.fill(1.);
+        let v: Vector = x.into();
+        drop(fespace);
+        assert_eq!(v[0], 1.);
+        Ok(())
+    }
 }
