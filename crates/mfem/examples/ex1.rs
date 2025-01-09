@@ -64,15 +64,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    If order < 1, we instead use an isoparametric/isogeometric space.
     let nodes = mesh.get_nodes();
     let fec: &AFiniteElementCollection = if args.order > 0 {
-        &H1_FECollection::new(args.order, dim, BasisType::GaussLobatto)
+        &H1_FECollection::new(args.order, dim)
     } else if nodes.is_some() {
         &nodes.unwrap().fec()
     } else {
-        &H1_FECollection::new(1, dim, BasisType::GaussLobatto)
+        &H1_FECollection::new(1, dim)
     };
     dbg!(fec.get_name());
 
-    let fespace = FiniteElementSpace::new(&mesh, fec, 1, Ordering::ByNodes);
+    let fespace = FiniteElementSpace::new(&mesh, fec);
     println!(
         "Number of finite element unknowns: {}",
         fespace.get_true_vsize(),
@@ -105,12 +105,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 8. Define the solution vector `x` as a finite element grid
     //    function corresponding to fespace.  Initialize x with initial
     //    guess of zero, which satisfies the boundary conditions.
-    let mut x = GridFunction::with_fes(&fespace);
+    let mut x = GridFunction::new(&fespace);
     x.fill(0.0);
 
     // 9. Set up the bilinear form a(.,.) on the finite element space
-    //    corresponding to the Laplacian operator -Delta, by adding
-    //    the Diffusion domain integrator.
+    //    corresponding to the Laplacian operator -Δ, by adding the
+    //    Diffusion domain integrator.
     let mut a = BilinearForm::new(&fespace);
     // Remark: the original code reuses the `one` above but, since it
     // is mutably borrowed and still needed for `b`, a new coefficient

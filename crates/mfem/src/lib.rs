@@ -853,7 +853,7 @@ impl H1_FECollection {
     #[doc(alias = "H1Pos_FECollection")]
     pub fn pos(p: i32, dim: i32) -> Self {
         // https://docs.mfem.org/html/fe__coll_8hpp_source.html#l00305
-        Self::new(p, dim, BasisType::Positive)
+        Self::with_basis(p, dim, BasisType::Positive)
     }
 
     /// Return a H1-conforming (continuous) serendipity finite elements
@@ -861,7 +861,7 @@ impl H1_FECollection {
     /// works in 2D only; 3D version is in development.
     #[doc(alias = "H1Ser_FECollection")]
     pub fn ser(p: i32, dim: i32) -> Self {
-        Self::new(p, dim, BasisType::Serendipity)
+        Self::with_basis(p, dim, BasisType::Serendipity)
     }
 
     /// Return a "H^{1/2}-conforming" trace finite elements with order
@@ -870,8 +870,20 @@ impl H1_FECollection {
     /// the H1-conforming FEs.
     #[doc(alias = "H1_Trace_FECollection")]
     pub fn trace(p: i32, dim: i32, btype: BasisType) -> Self {
-        Self::new(p, dim - 1, btype)
+        Self::with_basis(p, dim - 1, btype)
     }
+
+    /// Return a H1-conforming (continuous) finite elements with order
+    /// `p`, dimension `dim` and basis type `btype`.
+    pub fn with_basis(p: i32, dim: i32, btype: BasisType) -> Self {
+        let h1 = mfem::H1_FECollection::new(
+            c_int(p),
+            c_int(dim),
+            c_int(btype as i32),
+        );
+        H1_FECollection::emplace(h1)
+    }
+
 }
 
 impl AH1_FECollection {
@@ -916,7 +928,18 @@ wrap_mfem!(
 subclass!(owned CrouzeixRaviartFECollection<>, AFiniteElementCollection);
 
 pub enum Ordering {
+    /// This ordering arranges the DOFs by nodes first.  It is often
+    /// used for continuous finite element spaces, such as those based
+    /// on H¹ elements.  This ordering is beneficial for certain types
+    /// of solvers and preconditioners that exploit the nodal
+    /// structure of the problem.
     ByNodes = mfem::Ordering_Type::byNODES as isize,
+    /// This ordering arranges the DOFs by vector dimension first.  It
+    /// is typically used for vector-valued problems where the
+    /// components of the vector field are stored consecutively.  This
+    /// can be useful for problems in elasticity or fluid dynamics
+    /// where the vector field represents physical quantities like
+    /// displacement or velocity.
     ByVdim = mfem::Ordering_Type::byVDIM as isize,
 }
 
@@ -936,7 +959,19 @@ wrap_mfem!(
     base AFiniteElementSpace);
 
 impl<'a> FiniteElementSpace<'a> {
+    /// Return a new space from the `mesh` an Finite Element
+    /// Collection `fec`.
     pub fn new<'mesh: 'a, 'fec: 'a>(
+        mesh: &'mesh Mesh,
+        fec: &'fec AFiniteElementCollection,
+    ) -> Self {
+        Self::with_ordering(mesh, fec, 1, Ordering::ByNodes)
+    }
+
+    /// Return a new space from the `mesh` an Finite Element
+    /// Collection `fec`.  This is a space of vectors with `vdim`
+    /// components and arranges the degrees of freedom by `ordering`.
+    pub fn with_ordering<'mesh: 'a, 'fec: 'a>(
         mesh: &'mesh Mesh,
         fec: &'fec AFiniteElementCollection,
         vdim: i32,
@@ -951,10 +986,15 @@ impl<'a> FiniteElementSpace<'a> {
         Self::from_unique_ptr(fes)
     }
 
+    /// Return the number of vector true (conforming) dofs.
     pub fn get_true_vsize(&self) -> i32 {
         mfem::FES_GetTrueVSize(self.as_mfem()).into()
     }
 
+    /// Mark degrees of freedom associated with boundary elements with
+    /// the specified boundary attributes (marked in `bdr_attr_is_ess`).
+    /// For spaces with `vdim` > 1, the `component` parameter can be
+    /// used to restricts the marked vDOFs to the specified component.
     pub fn get_essential_true_dofs(
         &self,
         bdr_attr_is_ess: &ArrayInt,
@@ -967,6 +1007,22 @@ impl<'a> FiniteElementSpace<'a> {
             ess_tdof_list.as_mut_mfem(),
             c_int(component.map(|c| c as i32).unwrap_or(-1)),
         )
+    }
+
+    /// Get a list of all boundary true dofs, `boundary_dofs`.  For
+    /// spaces with `vdim` > 1, the `component` parameter can be used
+    /// to restrict the marked tDOFs to the specified component.
+    /// Equivalent to [`SElf::get_essential_true_dofs` with all
+    /// boundary attributes marked as essential.
+    pub fn get_boundary_true_dofs(
+        &self,
+        boundary_dofs: &mut AArrayInt,
+		component: Option<usize>
+    ) {
+        mfem::FES_GetBoundaryTrueDofs(
+            self.as_mfem(),
+            boundary_dofs.as_mut_mfem(),
+            c_int(component.map(|c| c as i32).unwrap_or(-1)));
     }
 }
 
@@ -984,8 +1040,10 @@ impl<'fes> GridFunction<'fes> {
     // XXX Can `fes` be mutated?
     // Hopefully so because it is shared with e.g. `Linearform`
     // XXX can you pass a different `fes` than the one for `Linearform`?
+    /// Construct a GridFunction associated with the
+    /// FiniteElementSpace `fes`.
     #[inline]
-    pub fn with_fes(fes: &'fes FiniteElementSpace) -> Self {
+    pub fn new(fes: &'fes FiniteElementSpace) -> Self {
         let gf = unsafe {
             mfem::GridFunction::new2(fes.as_mfem() as *const _ as *mut _)
         };
