@@ -486,6 +486,51 @@ wrap_mfem!(
 // XXX Ok to do with an abstract type?
 subclass!(unsafe base AMatrix, Operator);
 
+wrap_mfem_base!(Element, mfem Element);
+
+#[derive(Debug, Clone, Copy)]
+pub enum ElementType {
+    Point, Segment, Triangle, Quadrilateral,
+    Tetrahedron, Hexahedron, Wedge, Pyramid,
+}
+
+impl From<mfem::Element_Type> for ElementType {
+    fn from(et: mfem::Element_Type) -> Self {
+        use ElementType::*;
+        match et {
+            mfem::Element_Type::POINT => Point,
+            mfem::Element_Type::SEGMENT => Segment,
+            mfem::Element_Type::TRIANGLE => Triangle,
+            mfem::Element_Type::QUADRILATERAL => Quadrilateral,
+            mfem::Element_Type::TETRAHEDRON => Tetrahedron,
+            mfem::Element_Type::HEXAHEDRON => Hexahedron,
+            mfem::Element_Type::WEDGE => Wedge,
+            mfem::Element_Type::PYRAMID => Pyramid,
+        }
+    }
+}
+impl From<ElementType> for mfem::Element_Type {
+    fn from(et: ElementType) -> mfem::Element_Type {
+        use ElementType::*;
+        match et {
+            Point => mfem::Element_Type::POINT,
+            Segment => mfem::Element_Type::SEGMENT,
+            Triangle => mfem::Element_Type::TRIANGLE,
+            Quadrilateral => mfem::Element_Type::QUADRILATERAL,
+            Tetrahedron => mfem::Element_Type::TETRAHEDRON,
+            Hexahedron => mfem::Element_Type::HEXAHEDRON,
+            Wedge => mfem::Element_Type::WEDGE,
+            Pyramid => mfem::Element_Type::PYRAMID,
+        }
+    }
+}
+
+impl Element {
+    pub fn get_type(&self) -> ElementType {
+        self.as_mfem().GetType().into()
+    }
+}
+
 
 /// Algorithm for [`AMesh::uniform_refinement`].
 pub enum RefAlgo {
@@ -512,6 +557,41 @@ impl Mesh {
         Self::emplace(mfem::Mesh::new1())
     }
 
+    /// Creates 1D mesh for the interval divided into `n` equal intervals.
+    pub fn make_cartesian1d(n: usize, sx: f64) -> Self {
+        Self::emplace(mfem::Mesh::MakeCartesian1D(c_int(n as i32), sx))
+    }
+
+    pub fn cartesian2d(
+        nx: usize,
+        ny: usize,
+        ty: ElementType,
+    ) -> Cartesian2D {
+        Cartesian2D {
+            nx, ny, ty,
+            generate_edges: true,
+            sx: 1.,  sy: 1.,  scf_ordering: true,
+        }
+    }
+
+    // revisit interface
+    pub fn init(
+        dim: usize,
+        nvert: usize,
+        nelem: usize,
+        nbdr_elem: usize,
+        space_dim: Option<usize>,
+    ) -> MeshBuilder {
+        let space_dim = space_dim.map(|x| x as i32).unwrap_or(-1);
+        let inner = Self::emplace(mfem::Mesh::new5(
+            c_int(dim as i32),
+            c_int(nvert as i32),
+            c_int(nelem as i32),
+            c_int(nbdr_elem as i32),
+            c_int(space_dim as i32)));
+        MeshBuilder { inner, dim }
+    }
+
     /// Return a mesh read from file in MFEM, Netgen, or VTK format.
     #[doc(alias = "LoadFromFile")]
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Error> {
@@ -535,6 +615,61 @@ impl Mesh {
             fix_orientation,
         );
         Ok(Self::emplace(mesh))
+    }
+}
+
+pub struct Cartesian2D {
+    nx: usize,
+    ny: usize,
+    ty: ElementType,
+    generate_edges: bool,
+    sx: f64,
+    sy: f64,
+    scf_ordering: bool,
+}
+
+impl Cartesian2D {
+    pub fn generate_edges(self, yes: bool) -> Self {
+        Self { generate_edges: yes, .. self }
+    }
+
+    /// Set the length of the rectangle.
+    pub fn sx(self, sx: f64) -> Self {
+        Self { sx, .. self }
+    }
+
+    /// Set the height of the rectangle.
+    pub fn sy(self, sy: f64) -> Self {
+        Self { sy, .. self }
+    }
+
+    /// Set wether to use space-filling curve ordering.  Default: `true`.
+    pub fn scf_ordering(self, yes: bool) -> Self {
+        Self { scf_ordering: yes, .. self }
+    }
+
+    pub fn make(&self) -> Mesh {
+        Mesh::emplace(mfem::Mesh::MakeCartesian2D(
+            c_int(self.nx as i32), c_int(self.ny as i32),
+            self.ty.into(), self.generate_edges,
+            self.sx, self.sy, self.scf_ordering))
+    }
+}
+
+pub struct MeshBuilder {
+    inner: Mesh,
+    dim: usize,
+}
+
+impl MeshBuilder {
+    pub fn add_vertex<const N: usize>(&mut self, coord: [f64; N]) -> i32 {
+        if N != self.dim {
+            panic!("MeshBuilder::add_vertex: expected dim {}, got {N}",
+                self.dim);
+        }
+        unsafe {
+            self.inner.as_mut_mfem().AddVertex1(coord.as_ptr()).into()
+        }
     }
 }
 

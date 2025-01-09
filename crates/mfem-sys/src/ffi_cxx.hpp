@@ -28,6 +28,8 @@ SparseMatrix const& OperatorHandle_SparseMatrix(OperatorHandle const& x) {
     return *x.As<SparseMatrix>();
 }
 
+using Element_Type = Element::Type;
+
 using c_void = void;
 
 std::unique_ptr<FunctionCoefficient>

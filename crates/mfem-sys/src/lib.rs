@@ -19,14 +19,21 @@ include_cpp! {
     generate!("extra::ArrayInt_len")
     generate!("extra::ArrayInt_GetData")
     generate!("extra::ArrayInt_GetDataMut")
-    generate!("extra::Mesh_bdr_attributes")
 
     // mfem::Operator is abstract, no automatic binding.
     generate!("mfem::Operator_Type") // Operator::Type
     generate!("mfem::Matrix")
 
-    generate!("mfem::Ordering")
+    generate!("mfem::Element_Type")
+
     generate!("mfem::Mesh")
+    generate!("extra::Mesh_bdr_attributes")
+    generate!("mfem::Mesh_Operation")       // Mesh::Operation
+    generate!("mfem::Mesh_FaceTopology")    // Mesh::FaceTopology
+    generate!("mfem::Mesh_ElementLocation") // Mesh::ElementLocation
+    generate!("mfem::Mesh_ElementConformity") // Mesh::ElementConformity
+    generate!("mfem::Mesh_FaceInfoTag")     // Mesh::FaceInfoTag
+
     generate!("mfem::FiniteElement")
     generate!("mfem::FiniteElementCollection")
     generate!("mfem::L2_FECollection")
@@ -35,6 +42,8 @@ include_cpp! {
     generate!("mfem::RT_FECollection")
     generate!("mfem::ND_FECollection")
     generate!("mfem::CrouzeixRaviartFECollection")
+
+    generate!("mfem::Ordering")
     // `FiniteElementSpace` contains protected types which are not
     // handled well.  Thus, one must bind by hand.
     // generate!("mfem::FiniteElementSpace")
@@ -103,6 +112,13 @@ mod ffi_cxx {
             self: Pin<&mut Operator>,
             X: &Vector, b: &Vector, x: Pin<&mut Vector>);
 
+        #[namespace = "mfem"]
+        type Element;
+        #[namespace = "mfem::Element"]
+        #[cxx_name = "Type"]
+        type Element_Type = crate::Element_Type;
+        fn GetType(self: &Element) -> Element_Type;
+
         // autocxx does not bind any constructor of `FunctionCoefficient`.
         // Moreover, we "enhance" the interface to allow to pass closures.
         #[namespace = "mfem"]
@@ -155,6 +171,7 @@ pub use ffi_cxx::{
     Matrix_to_operator, Matrix_to_operator_mut,
     c_void, new_FunctionCoefficient,
     Operator, OperatorHandle_operator, OperatorHandle_operator_mut,
+    Element,
     OperatorHandle_SparseMatrix,
     PCG,
 };
