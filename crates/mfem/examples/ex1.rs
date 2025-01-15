@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut one = ConstantCoefficient::new(1.0);
     // let mut one = FunctionCoefficient::new(|_| 1.0);
     let mut b = LinearForm::new(&fespace);
-    let integrator = DomainLFIntegrator::new(&mut one, 2, 0);
+    let integrator = DomainLFIntegrator::new(&mut one);
     b.add_domain_integrator(integrator);
     // drop(one); // With this, it must fail to compile.
     b.assemble();
@@ -112,12 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    corresponding to the Laplacian operator -Δ, by adding the
     //    Diffusion domain integrator.
     let mut a = BilinearForm::new(&fespace);
-    // Remark: the original code reuses the `one` above but, since it
-    // is mutably borrowed and still needed for `b`, a new coefficient
-    // is better.
-    let mut one = ConstantCoefficient::new(1.0);
-    let bf_integrator = DiffusionIntegrator::new(&mut one);
-    a.add_domain_integrator(bf_integrator);
+    a.add_domain_integrator(DiffusionIntegrator::new());
 
     // 10. Assemble the bilinear form and the corresponding linear
     //     system, applying any necessary transformations such as:

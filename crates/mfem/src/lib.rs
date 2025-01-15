@@ -1218,10 +1218,18 @@ subclass!(unsafe DomainLFIntegrator<'deps>, into LinearFormIntegrator<'deps>);
 
 
 impl<'coeff> DomainLFIntegrator<'coeff> {
-    pub fn new(qf: &'coeff mut Coefficient, a: i32, b: i32) -> Self {
+    /// Return a new linear form integrator v ↦  ∫ fv with order 2.
+    pub fn new(qf: &'coeff mut Coefficient) -> Self {
+        Self::with_order(qf, 2)
+    }
+
+    /// Return a new linear form integrator v ↦  ∫ fv with order `a`.
+    pub fn with_order(qf: &'coeff mut Coefficient, a: usize) -> Self {
         // Safety: The result does not seem to take ownership of `qf`.
         let qf = qf.as_mut_mfem();
-        let lfi = mfem::DomainLFIntegrator::new(qf, c_int(a), c_int(b));
+        let a = c_int(a as i32);
+        let options = c_int(0);
+        let lfi = mfem::DomainLFIntegrator::new(qf, a, options);
         Self::emplace(lfi)
     }
 }
@@ -1279,14 +1287,22 @@ subclass!(owned
     into BilinearFormIntegrator<'a>, ABilinearFormIntegrator);
 
 impl<'coeff> DiffusionIntegrator<'coeff> {
-    pub fn new(qf: &'coeff mut Coefficient) -> Self {
-        let qf = qf.as_mut_mfem();
+    /// Return a diffusion integrator with coefficient 1:
+    /// (u, v) ↦ ∫ ∇u∇v.
+    pub fn new() -> Self {
+        let bfi = unsafe {
+            mfem::DiffusionIntegrator::new(ptr::null())
+        };
+        Self::emplace(bfi)
+    }
+
+    /// Return a diffusion integrator with coefficient `q`:
+    /// (u, v) ↦ ∫ q ∇u∇v.
+    pub fn with_coeff(q: &'coeff mut Coefficient) -> Self {
+        let q = q.as_mut_mfem();
         let ir: *const mfem::IntegrationRule = ptr::null();
-        let bfi = unsafe { mfem::DiffusionIntegrator::new1(qf, ir) };
-        Self {
-            inner: UniquePtr::emplace(bfi),
-            marker: PhantomData,
-        }
+        let bfi = unsafe { mfem::DiffusionIntegrator::new1(q, ir) };
+        Self::emplace(bfi)
     }
 }
 
