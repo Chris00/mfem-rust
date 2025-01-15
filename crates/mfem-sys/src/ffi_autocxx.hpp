@@ -1,4 +1,8 @@
+// Disable the surious warnings for the mfem header file.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
 #include "mfem.hpp"
+#pragma GCC diagnostic pop
 
 #ifndef RUST_EXTRA_H
 #define RUST_EXTRA_H

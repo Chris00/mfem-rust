@@ -22,7 +22,7 @@ fn main() -> eyre::Result<()> {
         .compile("mfem-sys");
 
     println!("cargo:rerun-if-changed=src/lib.rs");
-    println!("cargo:rerun-if-changed=src/extra.hpp");
+    println!("cargo:rerun-if-changed=src/ffi_autocxx.hpp");
     println!("cargo:rerun-if-changed=src/ffi_cxx.hpp");
     Ok(())
 }

@@ -4,8 +4,9 @@
 use autocxx::prelude::*;
 
 include_cpp! {
-    #include "mfem.hpp"
-    #include "extra.hpp"
+    // "mfem.hpp" is included by extra.hpp with some pragma to disable
+    // spurious warnings.
+    #include "ffi_autocxx.hpp"
     safety!(unsafe)
     generate!("extra::Mfem_MFEM_USE_EXCEPTIONS")
     generate!("extra::NumBasisTypes")
