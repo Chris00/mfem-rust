@@ -24,8 +24,13 @@ Operator& OperatorHandle_operator_mut(OperatorHandle& x) {
     return *x;
 }
 
-SparseMatrix const& OperatorHandle_SparseMatrix(OperatorHandle const& x) {
+SparseMatrix const& OperatorHandle_ref_SparseMatrix(OperatorHandle const& x) {
     return *x.As<SparseMatrix>();
+}
+
+std::unique_ptr<OperatorHandle>
+SparseMatrix_to_OperatorHandle(SparseMatrix *x) {
+    return std::make_unique<OperatorHandle>(x, false);
 }
 
 using Element_Type = Element::Type;

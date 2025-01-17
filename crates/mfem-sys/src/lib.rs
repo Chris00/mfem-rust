@@ -147,8 +147,10 @@ mod ffi_cxx {
 
         #[namespace = "mfem"]
         type SparseMatrix = crate::SparseMatrix;
-        unsafe fn OperatorHandle_SparseMatrix<'a>(
+        unsafe fn OperatorHandle_ref_SparseMatrix<'a>(
             o: &'a OperatorHandle) -> &'a SparseMatrix;
+        unsafe fn SparseMatrix_to_OperatorHandle<'a>(
+            o: *mut SparseMatrix) -> UniquePtr<OperatorHandle>;
 
         #[namespace = "mfem"]
         type Solver = crate::Solver;
@@ -173,7 +175,7 @@ pub use ffi_cxx::{
     c_void, new_FunctionCoefficient,
     Operator, OperatorHandle_operator, OperatorHandle_operator_mut,
     Element,
-    OperatorHandle_SparseMatrix,
+    OperatorHandle_ref_SparseMatrix, SparseMatrix_to_OperatorHandle,
     PCG,
 };
 

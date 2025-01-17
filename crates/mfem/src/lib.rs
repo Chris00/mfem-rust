@@ -1391,7 +1391,7 @@ wrap_mfem!(
     /// This provides a common type for global, matrix-type operators
     /// to be used in bilinear forms, gradients of nonlinear forms,
     /// static condensation, hybridization, etc.
-    OperatorHandle<>, base AOperatorHandle);
+    OperatorHandle<'deps>, base AOperatorHandle);
 
 // `OperatorHandle` is NOT a subclass of `Operator` but contains a
 // pointer to an operator.  However, in C++, the operator *
@@ -1418,13 +1418,13 @@ impl ::std::ops::DerefMut for AOperatorHandle {
     }
 }
 
-impl Default for OperatorHandle {
+impl Default for OperatorHandle<'static> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl OperatorHandle {
+impl OperatorHandle<'static> {
     pub fn new() -> Self {
         Self::emplace(mfem::OperatorHandle::new())
     }
@@ -1446,7 +1446,7 @@ impl<'a> TryFrom<&'a AOperatorHandle> for &'a ASparseMatrix {
     fn try_from(oh: &'a AOperatorHandle) -> Result<Self, Self::Error> {
         if oh.get_type() == OperatorType::MFEM_SPARSEMAT {
             unsafe {
-                let m = mfem::OperatorHandle_SparseMatrix(oh.as_mfem());
+                let m = mfem::OperatorHandle_ref_SparseMatrix(oh.as_mfem());
                 Ok(&ASparseMatrix::ref_of_mfem(m))
             }
         } else {
@@ -1455,10 +1455,10 @@ impl<'a> TryFrom<&'a AOperatorHandle> for &'a ASparseMatrix {
     }
 }
 // Deref not followed for traits.
-impl<'a> TryFrom<&'a OperatorHandle> for &'a ASparseMatrix {
+impl<'a> TryFrom<&'a OperatorHandle<'a>> for &'a ASparseMatrix {
     type Error = Error;
 
-    fn try_from(oh: &'a OperatorHandle) -> Result<Self, Self::Error> {
+    fn try_from(oh: &'a OperatorHandle<'a>) -> Result<Self, Self::Error> {
         let oh: &'a AOperatorHandle = oh;
         oh.try_into()
     }
@@ -1468,6 +1468,24 @@ wrap_mfem!(
     /// Data type sparse matrix.
     SparseMatrix<>, base ASparseMatrix);
 // Sub-class of AbstractSparseMatrix, itself a subclass of Matrix.
+subclass!(unsafe
+    SparseMatrix<>, base ASparseMatrix,
+    Matrix<>, AMatrix);
+
+impl SparseMatrix {
+    pub fn new() -> Self {
+        Self::emplace(mfem::SparseMatrix::new())
+    }
+}
+
+impl ASparseMatrix {
+    pub fn as_oper(&mut self) -> OperatorHandle<'_> {
+        let x = unsafe { self.as_mut_mfem().get_unchecked_mut() };
+        OperatorHandle::from_unique_ptr(
+            unsafe { mfem::SparseMatrix_to_OperatorHandle(x) })
+    }
+}
+
 
 
 wrap_mfem_base!(
