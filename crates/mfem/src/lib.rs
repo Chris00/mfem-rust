@@ -1348,19 +1348,53 @@ impl<'a> BilinearForm<'a> {
         self.inner.pin_mut().Assemble(c_int(skip_zeros));
     }
 
+    /// Form the linear system A X = B, corresponding to this bilinear
+    /// form and the linear form `b`(.).
+    ///
+    /// This method applies any necessary transformations to the
+    /// linear system such as: eliminating boundary conditions;
+    /// applying conforming constraints for non-conforming AMR;
+    /// parallel assembly; static condensation; hybridization.
+    ///
+    /// The [`GridFunction`]-size vector `x` must contain the
+    /// essential b.c.  The BilinearForm and the LinearForm-size
+    /// vector `b` must be assembled.
+    ///
+    /// The vector `x_vec` is initialized with a suitable initial
+    /// guess: when using hybridization, the vector `x_vec` is set to
+    /// zero; otherwise, the essential entries of `x_vec` are set to
+    /// the corresponding b.c. and all other entries are set to zero
+    /// (`copy_interior` == 0) or copied from `x` (copy_interior != 0).
+    ///
+    /// This method can be called multiple times (with the same
+    /// `ess_tdof_list` array) to initialize different right-hand
+    /// sides and boundary condition values.
+    ///
+    /// After solving the linear system, the finite element solution x can
+    /// be recovered by calling [`recover_fem_solution`] (with the same
+    /// vectors `x_vec`, `b`, and `x`).
+    ///
+    /// NOTE: If there are no transformations, `x_vec` simply reuses the
+    /// data of `x`.
     pub fn form_linear_system(
         &mut self,
         ess_tdof_list: &AArrayInt,
         x: &AVector,
         b: &AVector,
-        a_mat: &mut OperatorHandle,
-        x_vec: &mut AVector,
-        b_vec: &mut AVector,
-    ) {
+    ) -> (OperatorHandle<'a>, Vector, Vector) {
+        // FIXME: The possible dependency of `x_vec` and `b_vec` on
+        // `x` and `b` must be expressed.
         let copy_interior = c_int(0);
         // self.as_mut_mfem().FormLinearSystem(
         //     ess_tdof_list, x, b,
         //     a_mat, x_vec, b_vec, copy_interior);
+        // FIXME: is there a point to allow passing `a_mat`, `x_vec`
+        // and `b_vec` as optional arguments (moving them)?  Their
+        // data may be wiped out and redirected to the one of `self`,
+        // `x` and `b`.
+        let mut a_mat = OperatorHandle::new();
+        let mut x_vec = Vector::new();
+        let mut b_vec = Vector::new();
         mfem::BilinearForm_FormLinearSystem(
             self.as_mut_mfem(),
             ess_tdof_list.as_mfem(),
@@ -1371,6 +1405,7 @@ impl<'a> BilinearForm<'a> {
             x_vec.as_mut_mfem(),
             b_vec.as_mut_mfem(),
             copy_interior);
+        (a_mat, x_vec, b_vec)
     }
 
     // From `Operator`.

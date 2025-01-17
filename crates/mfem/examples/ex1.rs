@@ -120,11 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     constraints for non-conforming AMR, static condensation, etc.
     a.assemble(true);
 
-    let mut a_mat = OperatorHandle::new();
-    let mut x_vec = Vector::new();
-    let mut b_vec = Vector::new();
-    a.form_linear_system(
-        &ess_tdof_list, &x, &b, &mut a_mat, &mut x_vec, &mut b_vec);
+    let (a_mat, mut x_vec, b_vec) =
+        a.form_linear_system(&ess_tdof_list, &x, &b);
 
     println!("Size of linear system: {}", a_mat.height());
     dbg!(a_mat.get_type());
