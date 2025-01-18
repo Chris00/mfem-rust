@@ -381,7 +381,10 @@ impl AArrayInt {
 
 wrap_mfem!(
     /// Vector of [`f64`] numbers.
-    Vector<>,
+    ///
+    /// A `Vector` may depend on data owned by another vector.  The
+    /// lifetime reflects these possible dependencies.
+    Vector<'deps>,
     base
     /// Base type to which all structs that can be considered as vectors
     /// [`Deref`][::std::ops::Deref].
@@ -415,13 +418,13 @@ impl std::ops::DerefMut for AVector {
     }
 }
 
-impl Default for Vector {
+impl Default for Vector<'static> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Vector {
+impl Vector<'static> {
     /// Return a new, empty, vector.
     pub fn new() -> Self {
         Vector::emplace(mfem::Vector::new())
@@ -1034,7 +1037,7 @@ subclass!(
     GridFunction<'fes>, base AGridFunction,
     // FIXME: Does the reinterpretation as a vector no longer need the
     // space?  Freed correctly?
-    Vector<>, AVector);
+    Vector<'fes>, AVector);
 
 impl<'fes> GridFunction<'fes> {
     // XXX Can `fes` be mutated?
@@ -1241,7 +1244,7 @@ wrap_mfem!(
 subclass!(
     LinearForm<'deps>, base ALinearForm,
     // FIXME: Can drop the deps?
-    Vector<>, AVector);
+    Vector<'deps>, AVector);
 
 impl<'a> LinearForm<'a> {
     pub fn new(fes: &FiniteElementSpace<'a>) -> Self {
@@ -1321,6 +1324,33 @@ subclass!(
     // FIXME: Ok to drop the dependencies lifetime?
     Matrix<>, AMatrix);
 
+pub struct LinearSystem<'a, 'x, 'b> {
+    // It is important that these are public so that Rust borrow
+    // checker understands that they can be projected independently.
+    pub a: OperatorHandle<'a>,
+    pub x: Vector<'x>,
+    pub b: Vector<'b>,
+    // Since we have to pass the same arguments to
+    // recover_fem_solution, we keep them around the necessary deps.
+    bilin: &'a mut ABilinearForm,
+    sol: &'a mut AVector,
+    lin: &'a AVector,
+}
+
+impl<'a, 'x, 'b> LinearSystem<'a, 'x, 'b> {
+    /// Fill the `x` vector that was given to
+    /// [`BilinearForm::form_linear_system`] with the solution of to
+    /// the linear system.
+    // FIXME: Does it make sense to keep `self` any longer?  Do we
+    // want to take it by value?
+    pub fn recover_fem_solution(&mut self) {
+        // Virtual method from `Operator`.
+        let op: &mut Operator = &mut self.bilin;
+        unsafe { op.recover_fem_solution(&self.x, self.lin, self.sol); }
+    }
+}
+
+
 impl<'a> BilinearForm<'a> {
     pub fn new(fes: &FiniteElementSpace<'a>) -> Self {
         // XXX Safety: the underlying `fes` is not modified so can take it
@@ -1349,7 +1379,8 @@ impl<'a> BilinearForm<'a> {
     }
 
     /// Form the linear system A X = B, corresponding to this bilinear
-    /// form and the linear form `b`(.).
+    /// form and the linear form `b`(.) and return [`LinearSystem`]`{
+    /// a = A, x = X, b = B }`.
     ///
     /// This method applies any necessary transformations to the
     /// linear system such as: eliminating boundary conditions;
@@ -1376,18 +1407,13 @@ impl<'a> BilinearForm<'a> {
     ///
     /// NOTE: If there are no transformations, `x_vec` simply reuses the
     /// data of `x`.
-    pub fn form_linear_system(
-        &mut self,
+    pub fn form_linear_system<'l, 'x: 'l, 'b: 'l>(
+        &'l mut self,
         ess_tdof_list: &AArrayInt,
-        x: &AVector,
-        b: &AVector,
-    ) -> (OperatorHandle<'a>, Vector, Vector) {
-        // FIXME: The possible dependency of `x_vec` and `b_vec` on
-        // `x` and `b` must be expressed.
+        x: &'x mut AVector,
+        b: &'b mut AVector,
+    ) -> LinearSystem<'l, 'x, 'b> {
         let copy_interior = c_int(0);
-        // self.as_mut_mfem().FormLinearSystem(
-        //     ess_tdof_list, x, b,
-        //     a_mat, x_vec, b_vec, copy_interior);
         // FIXME: is there a point to allow passing `a_mat`, `x_vec`
         // and `b_vec` as optional arguments (moving them)?  Their
         // data may be wiped out and redirected to the one of `self`,
@@ -1398,26 +1424,19 @@ impl<'a> BilinearForm<'a> {
         mfem::BilinearForm_FormLinearSystem(
             self.as_mut_mfem(),
             ess_tdof_list.as_mfem(),
-            x.as_mfem(),
-            b.as_mfem(),
+            x.as_mut_mfem(),
+            b.as_mut_mfem(),
             // a_mat.as_mut_mfem(),
             a_mat.inner.as_mut().unwrap(),
             x_vec.as_mut_mfem(),
             b_vec.as_mut_mfem(),
             copy_interior);
-        (a_mat, x_vec, b_vec)
+        LinearSystem {
+            a: a_mat, x: x_vec, b: b_vec,
+            bilin: self,  sol: x,  lin: &*b,
+        }
     }
 
-    // From `Operator`.
-    pub fn recover_fem_solution(
-        &mut self,
-        from: &AVector,
-        b: &AVector,
-        x: &mut AVector,
-    ) {
-        let op: &mut Operator = self;
-        unsafe { op.recover_fem_solution(from, b, x); }
-    }
 }
 
 wrap_mfem!(

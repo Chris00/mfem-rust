@@ -86,20 +86,18 @@ namespace extra {
     using LFI = mfem::LinearFormIntegrator;
     using BFI = mfem::BilinearFormIntegrator;
 
-    // Changes in mutability and Array<int> detected.
-    void BilinearForm_FormLinearSystem(
+    // Array<int> detected.
+    inline void BilinearForm_FormLinearSystem(
         BilinearForm &bf,
         const ArrayInt &ess_tdof_list,
-        const Vector &x,
-        const Vector &b,
+        Vector &x,
+        Vector &b,
         OperatorHandle &A,
         Vector &X,
         Vector &B,
         int copy_interior)
     {
-        auto& mx = const_cast<Vector&>(x);
-        auto& mb = const_cast<Vector&>(b);
-        bf.FormLinearSystem(ess_tdof_list, mx, mb, A, X, B, copy_interior);
+        bf.FormLinearSystem(ess_tdof_list, x, b, A, X, B, copy_interior);
     }
 }
 

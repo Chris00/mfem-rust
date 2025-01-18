@@ -58,20 +58,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 8. Form the linear system A X = B. This includes eliminating
     //    boundary conditions, applying AMR constraints, and other
     //    transformations.
-    let (a_mat, b_vec, mut x_vec) =
-        a.form_linear_system(&boundary_dofs, &x, &b);
-    let a_mat: &ASparseMatrix = (&a_mat).try_into()?;
+    let mut ls = a.form_linear_system(&boundary_dofs, &mut x, &mut b);
+    let a_mat: &ASparseMatrix = (&ls.a).try_into()?;
 
     // 9. Solve the system using PCG with symmetric Gauss-Seidel
     // preconditioner.
     let mut m = GSSmoother::new(&a_mat, 0, 1);
-    mfem::pcg(&a_mat, &mut m, &b_vec, &mut x_vec)
+    mfem::pcg(&a_mat, &mut m, &ls.b, &mut ls.x)
         .print_iter(true).solve();
 
     // 10. Recover the solution x as a grid function and save to
     //     file. The output can be viewed using GLVis as follows:
     //     "glvis -m mesh.mesh -g sol.gf"
-    a.recover_fem_solution(&x_vec, &b, &mut x);
+    ls.recover_fem_solution();
     x.save().to_file("sol.gf");
     mesh.save().to_file("mesh.mesh");
     Ok(())

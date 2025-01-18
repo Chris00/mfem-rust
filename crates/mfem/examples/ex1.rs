@@ -120,20 +120,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     constraints for non-conforming AMR, static condensation, etc.
     a.assemble(true);
 
-    let (a_mat, mut x_vec, b_vec) =
-        a.form_linear_system(&ess_tdof_list, &x, &b);
-
-    println!("Size of linear system: {}", a_mat.height());
-    dbg!(a_mat.get_type());
+    let mut ls = a.form_linear_system(&ess_tdof_list, &mut x, &mut b);
+    println!("Size of linear system: {}", ls.a.height());
+    dbg!(ls.a.get_type());
 
     // 11. Solve the linear system A X = B.
     // Use a simple symmetric Gauss-Seidel preconditioner with PCG.
-    let a_sparse: &ASparseMatrix = (&a_mat).try_into()?;
+    let a_sparse: &ASparseMatrix = (&ls.a).try_into()?;
     let mut m_mat = GSSmoother::new(a_sparse, 0, 1);
-    mfem::pcg(&a_mat, &mut m_mat, &b_vec, &mut x_vec).print_iter(true).solve();
+    mfem::pcg(&ls.a, &mut m_mat, &ls.b, &mut ls.x).print_iter(true).solve();
 
     // 12. Recover the solution as a finite element grid function.
-    a.recover_fem_solution(&x_vec, &b, &mut x);
+    ls.recover_fem_solution();
 
     // 13. Save the refined mesh and the solution. This output can be
     //     viewed later using GLVis: "glvis -m refined.mesh -g sol.gf".
