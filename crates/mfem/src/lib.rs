@@ -44,9 +44,9 @@ trait WrapMfem {
     }
 }
 
-/// Wrap mfem::$ty into $tymfem.  This `Deref` to this base and not
-/// inherit the C++ operations (we want to define our own to have a
-/// sleek Rusty interface).
+/// Wrap mfem::$ty into $tymfem.  This wrapping avoids to inherit the
+/// C++ operations (we want to define our own to have a sleek Rusty
+/// interface).
 ///
 /// You want to define a base type if one of the two situations occurs:
 /// - The type is returned by reference from functions;
@@ -54,16 +54,15 @@ trait WrapMfem {
 ///   by `Deref` to the base class — hence returning a ref to this type).
 macro_rules! wrap_mfem_base {
     ($(#[$doc: meta])* $tymfem: ident, mfem $ty: ident) => {
-        // Wrap the `mfem` value in order not to inherit `mfem`
-        // methods (we want to redefine them with Rust conventions).
-        //
         // When a C++ method return a pointer, we want be able to
         // interpret it as a (mutable) reference to this wrapper
-        // struct.  The memory of this type is controlled by C++,
-        // it should never be accessible as a Rust value.
+        // struct, whence the `transparent` representation.
         #[repr(transparent)]
         #[allow(non_camel_case_types)]
         $(#[$doc])*
+        ///
+        /// Remark: This type points to C++ memory so it cannot be
+        /// accessed by value, only by (mutable) reference.
         pub struct $tymfem {
             inner: mfem:: $ty,
         }
@@ -173,6 +172,8 @@ macro_rules! wrap_mfem {
         #[allow(non_camel_case_types)]
         #[repr(transparent)]
         pub struct $ty $(<$l>)? {
+            // The UniquePtr is assumed to be non-null — otherwise the
+            // Deref to "base" types will not work.
             inner: UniquePtr<mfem:: $ty>,
             marker: PhantomData<$(&$l)? ()>,
         }
@@ -180,6 +181,7 @@ macro_rules! wrap_mfem {
             type Mfem = mfem::$ty;
             #[inline]
             fn from_unique_ptr(ptr: UniquePtr<mfem:: $ty>) -> Self {
+                debug_assert!(! ptr.is_null());
                 Self { inner: ptr,  marker: PhantomData }
             }
             #[inline]
